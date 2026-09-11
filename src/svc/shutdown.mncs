@@ -1,0 +1,208 @@
+mncs 0.13;
+
+// svc.shutdown — graceful shutdown as an explicit state machine.
+//
+// A service shuts down in seven observable steps:
+//
+//   1. receive the shutdown signal (`begin`: READY|DEGRADED -> DRAINING,
+//      admission closes via `svc.lifecycle.admits`);
+//   2. stop admitting new work (immediate: the phase changed);
+//   3. notify dependent tasks (the orchestrator emits event kind 6;
+//      in-language dependents observe the DRAINING phase);
+//   4. drain active work (`note_done`: active decreases as workers
+//      settle; the queue stops feeding the pool);
+//   5. enforce the deadline (`step`: past-deadline with active work
+//      left forces `halt`, counted as deadline misses, never silent);
+//   6. release resources (`finish`: DRAINING -> STOPPING -> STOPPED,
+//      the resource receipt);
+//   7. produce final service state (`snapshot`: phase, drained total,
+//      missed count, deadline met).
+//
+// `Drain` threads the lifecycle value through every step, so the phase
+// and the counters can never disagree: there is exactly one state, not
+// a phase here and a counter there. Time is an explicit `now` argument
+// throughout — the orchestrator observes `clock_read()` once per sweep
+// and these pure steps decide.
+module svc.shutdown;
+
+use svc.lifecycle;
+use svc.time;
+
+// Drain codes: 0 = progress, 1 = drained clean, 2 = forced by deadline,
+// 3 = finished to STOPPED.
+record Drain {
+    life: svc.lifecycle.Svc,
+    active: u64,
+    admitted_total: u64,
+    drained_total: u64,
+    missed: u64,
+    deadline: u64,
+    started_at: u64
+}
+
+record Step { drain: Drain, done: bool, code: u64 }
+
+// Open a drain sweep. The lifecycle must already be DRAINING (the
+// caller applies `begin_drain` first); otherwise the sweep is refused
+// with code 4 and `done = true` so a mis-sequenced shutdown cannot
+// spin. `active` counts in-flight work the sweep must absorb.
+fn begin(life: svc.lifecycle.Svc, active: u64, admitted: u64, now: u64, budget: u64) -> (result: Step) {
+    let draining: bool = match life.phase {
+        CONSTRUCTED => false,
+        CONFIGURED => false,
+        STARTING => false,
+        READY => false,
+        DEGRADED => false,
+        DRAINING => true,
+        STOPPING => false,
+        STOPPED => false,
+        FAILED => false,
+    };
+    if !draining {
+        let idle: Drain = Drain {
+            life: life,
+            active: active,
+            admitted_total: admitted,
+            drained_total: 0,
+            missed: 0,
+            deadline: now,
+            started_at: now
+        };
+        return Step { drain: idle, done: true, code: 4 };
+    } else {
+    }
+    let sweep: Drain = Drain {
+        life: life,
+        active: active,
+        admitted_total: admitted,
+        drained_total: 0,
+        missed: 0,
+        deadline: svc.time.deadline_at(now, budget),
+        started_at: now
+    };
+    let clean: bool = active == 0;
+    return Step { drain: sweep, done: clean, code: select(clean, 1, 0) };
+}
+
+// Record `n` completions since the last sweep. Saturates: completions
+// beyond `active` absorb without wrapping, and the excess is counted as
+// `missed` (duplicate settle evidence) rather than hidden.
+fn note_done(d: Drain, n: u64) -> (result: Drain) {
+    let absorbed: u64 = select(n <= d.active, n, d.active);
+    let excess: u64 = select(n <= d.active, 0, n -% d.active);
+    return Drain {
+        ..d,
+        active: d.active -% absorbed,
+        drained_total: d.drained_total +% absorbed,
+        missed: d.missed +% excess
+    };
+}
+
+// One sweep step at `now`. Drained (active == 0) applies `stop` and
+// reports done with code 1. Past-deadline with work left applies
+// `halt` (reason 9 = drain deadline) and reports done with code 2 —
+// forced shutdown is a distinct, counted outcome. Otherwise the sweep
+// continues with code 0.
+fn step(d: Drain, now: u64) -> (result: Step) {
+    if d.active == 0 {
+        let t: svc.lifecycle.Transition = svc.lifecycle.stop(d.life);
+        return Step { drain: Drain { ..d, life: t.state }, done: true, code: 1 };
+    } else {
+    }
+    if svc.time.expired(d.deadline, now) {
+        let t: svc.lifecycle.Transition = svc.lifecycle.halt(d.life, 9);
+        let left: Drain = Drain { ..d, life: t.state, missed: d.missed +% d.active, active: 0 };
+        return Step { drain: left, done: true, code: 2 };
+    } else {
+    }
+    return Step { drain: d, done: false, code: 0 };
+}
+
+// Release resources: STOPPING -> STOPPED through `finish`. Accepted only
+// from a completed sweep (`done` steps); calling early is rejected with
+// the drain unchanged.
+fn finish(s: Step) -> (result: Step) {
+    if !s.done {
+        return s;
+    } else {
+    }
+    let t: svc.lifecycle.Transition = svc.lifecycle.finish(s.drain.life);
+    return Step { drain: Drain { ..s.drain, life: t.state }, done: t.accepted, code: 3 };
+}
+
+// Final receipt: packs (phase_rank, drained_total, missed, met) for
+// corpora and ledgers. phase_rank orders phases 0..=8 in declaration
+// order so receipts compare as integers.
+fn snapshot(d: Drain, met: bool) -> (result: Receipt) {
+    let rank: u64 = match d.life.phase {
+        CONSTRUCTED => 0,
+        CONFIGURED => 1,
+        STARTING => 2,
+        READY => 3,
+        DEGRADED => 4,
+        DRAINING => 5,
+        STOPPING => 6,
+        STOPPED => 7,
+        FAILED => 8,
+    };
+    return Receipt { phase_rank: rank, admitted: d.admitted_total, drained: d.drained_total, missed: d.missed, met: met };
+}
+
+record Receipt { phase_rank: u64, admitted: u64, drained: u64, missed: u64, met: bool }
+
+// --- Executable test entries ---
+
+// Clean shutdown: READY -> DRAINING, sweep with 2 active, both complete,
+// step drains, finish lands STOPPED. Receipt: phase rank 7, drained 2,
+// missed 0, met. Packs 7/2/0/flag to 7201.
+fn candidate_shutdown_clean() -> (result: i64) {
+    let t0: svc.lifecycle.Transition = svc.lifecycle.configure(svc.lifecycle.boot());
+    let t1: svc.lifecycle.Transition = svc.lifecycle.start(t0.state);
+    let t2: svc.lifecycle.Transition = svc.lifecycle.mark_ready(t1.state);
+    let t3: svc.lifecycle.Transition = svc.lifecycle.begin_drain(t2.state);
+    let b: Step = begin(t3.state, 2, 2, 1000, 500);
+    let open: bool = !b.done && b.code == 0;
+    let d1: Drain = note_done(b.drain, 1);
+    let partial: bool = d1.active == 1 && d1.drained_total == 1;
+    let d2: Drain = note_done(d1, 1);
+    let s1: Step = step(d2, 1100);
+    let drained: bool = s1.done && s1.code == 1;
+    let s2: Step = finish(s1);
+    let stopped: bool = s2.done && s2.code == 3;
+    let r: Receipt = snapshot(s2.drain, true);
+    let receipt: bool = r.phase_rank == 7 && r.admitted == 2 && r.drained == 2 && r.missed == 0 && r.met;
+    let ok: bool = t0.accepted && t1.accepted && t2.accepted && t3.accepted && open && partial && drained && stopped && receipt;
+    return select(ok, 7201, 0 - 1);
+}
+
+// Forced shutdown: 3 active with a 100 ms budget, sweep at +500 ms
+// forces halt, misses all 3; finish still lands STOPPED. Receipt:
+// phase rank 7, drained 0, missed 3, not met. Packs to 7030.
+fn candidate_shutdown_forced() -> (result: i64) {
+    let t0: svc.lifecycle.Transition = svc.lifecycle.configure(svc.lifecycle.boot());
+    let t1: svc.lifecycle.Transition = svc.lifecycle.start(t0.state);
+    let t2: svc.lifecycle.Transition = svc.lifecycle.mark_ready(t1.state);
+    let t3: svc.lifecycle.Transition = svc.lifecycle.begin_drain(t2.state);
+    let b: Step = begin(t3.state, 3, 3, 1000, 100);
+    let s1: Step = step(b.drain, 1500);
+    let forced: bool = s1.done && s1.code == 2 && s1.drain.active == 0;
+    let s2: Step = finish(s1);
+    let r: Receipt = snapshot(s2.drain, false);
+    let receipt: bool = r.phase_rank == 7 && r.admitted == 3 && r.drained == 0 && r.missed == 3 && !r.met;
+    let ok: bool = t0.accepted && t1.accepted && t2.accepted && t3.accepted && !b.done && forced && s2.done && receipt;
+    return select(ok, 7030, 0 - 1);
+}
+
+// Misuse: opening a sweep on a non-DRAINING lifecycle is refused with
+// code 4 and done, so a mis-sequenced shutdown cannot spin.
+fn candidate_shutdown_misuse() -> (result: i64) {
+    let t0: svc.lifecycle.Transition = svc.lifecycle.configure(svc.lifecycle.boot());
+    let t1: svc.lifecycle.Transition = svc.lifecycle.start(t0.state);
+    let t2: svc.lifecycle.Transition = svc.lifecycle.mark_ready(t1.state);
+    let b: Step = begin(t2.state, 0, 0, 1000, 500);
+    let refused: bool = b.done && b.code == 4;
+    let s1: Step = step(b.drain, 1000);
+    let early: bool = s1.done && s1.code == 1;
+    let ok: bool = t0.accepted && t1.accepted && t2.accepted && refused && early;
+    return select(ok, 114003, 0 - 1);
+}

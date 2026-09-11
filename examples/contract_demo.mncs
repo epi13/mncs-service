@@ -1,0 +1,25 @@
+mncs 0.13;
+
+// Contract admission matrix: a two-op service (idempotent read, strict
+// write) decides four requests — declared read, declared write,
+// undeclared op, over-wide read. The matrix packs found/width/safety
+// bits to 200006: every cell is a machine-readable contract answer,
+// never prose.
+module examples.contract_demo;
+
+use svc.contract;
+
+fn run() -> (result: i64) {
+    let read: svc.contract.Op = svc.contract.Op { id: 1, input_words: 2, idempotent: true, pure: true, max_ms: 500 };
+    let write: svc.contract.Op = svc.contract.Op { id: 2, input_words: 3, idempotent: false, pure: false, max_ms: 2000 };
+    let c: svc.contract.Contract = svc.contract.contract2(9, read, write);
+    let f1: svc.contract.Found = svc.contract.find(c, 1);
+    let f2: svc.contract.Found = svc.contract.find(c, 2);
+    let f9: svc.contract.Found = svc.contract.find(c, 9);
+    let declared_read: bool = f1.found && svc.contract.width_ok(f1.op, 2) && svc.contract.retry_safe(f1.op);
+    let declared_write: bool = f2.found && svc.contract.width_ok(f2.op, 3) && !svc.contract.retry_safe(f2.op);
+    let undeclared: bool = !f9.found;
+    let over_wide: bool = f1.found && !svc.contract.width_ok(f1.op, 3);
+    let ok: bool = declared_read && declared_write && undeclared && over_wide && c.service == 9;
+    return select(ok, 200006, 0 - 1);
+}

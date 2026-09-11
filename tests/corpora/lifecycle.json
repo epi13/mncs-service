@@ -1,0 +1,75 @@
+{
+ "schema_version": "0.1",
+ "name": "svc-lifecycle",
+ "cases": [
+  {
+   "id": "flow",
+   "request": {
+    "schema_version": "0.1",
+    "target": {
+     "module": "svc.lifecycle",
+     "function": "candidate_lifecycle_flow"
+    },
+    "arguments": [],
+    "step_budget": 4096
+   },
+   "expected": [
+    {
+     "integer": {
+      "value": 101001,
+      "type": {
+       "bits": 64,
+       "signed": true
+      }
+     }
+    }
+   ]
+  },
+  {
+   "id": "fail-restart",
+   "request": {
+    "schema_version": "0.1",
+    "target": {
+     "module": "svc.lifecycle",
+     "function": "candidate_lifecycle_fail_restart"
+    },
+    "arguments": [],
+    "step_budget": 4096
+   },
+   "expected": [
+    {
+     "integer": {
+      "value": 101002,
+      "type": {
+       "bits": 64,
+       "signed": true
+      }
+     }
+    }
+   ]
+  },
+  {
+   "id": "reject",
+   "request": {
+    "schema_version": "0.1",
+    "target": {
+     "module": "svc.lifecycle",
+     "function": "candidate_lifecycle_reject"
+    },
+    "arguments": [],
+    "step_budget": 4096
+   },
+   "expected": [
+    {
+     "integer": {
+      "value": 101003,
+      "type": {
+       "bits": 64,
+       "signed": true
+      }
+     }
+    }
+   ]
+  }
+ ]
+}

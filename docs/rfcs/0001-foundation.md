@@ -1,6 +1,6 @@
 # RFC 0001: Service foundation
 
-Status: Draft
+Status: Implemented (first slice — see ARCHITECTURE.md, RFCs 0002/0003)
 
 ## Principles
 

@@ -1,0 +1,179 @@
+{
+ "schema_version": "0.1",
+ "name": "svc-framing",
+ "cases": [
+  {
+   "id": "roundtrip-ascending",
+   "request": {
+    "schema_version": "0.1",
+    "target": {
+     "module": "svc.framing",
+     "function": "candidate_frame_roundtrip"
+    },
+    "arguments": [
+     {
+      "sequence": {
+       "values": [
+        {
+         "byte": {
+          "value": 10
+         }
+        },
+        {
+         "byte": {
+          "value": 20
+         }
+        },
+        {
+         "byte": {
+          "value": 30
+         }
+        },
+        {
+         "byte": {
+          "value": 40
+         }
+        }
+       ]
+      }
+     }
+    ],
+    "step_budget": 65536
+   },
+   "expected": [
+    {
+     "integer": {
+      "value": 107001,
+      "type": {
+       "bits": 64,
+       "signed": true
+      }
+     }
+    }
+   ]
+  },
+  {
+   "id": "roundtrip-zero",
+   "request": {
+    "schema_version": "0.1",
+    "target": {
+     "module": "svc.framing",
+     "function": "candidate_frame_roundtrip"
+    },
+    "arguments": [
+     {
+      "sequence": {
+       "values": [
+        {
+         "byte": {
+          "value": 0
+         }
+        },
+        {
+         "byte": {
+          "value": 0
+         }
+        },
+        {
+         "byte": {
+          "value": 0
+         }
+        },
+        {
+         "byte": {
+          "value": 0
+         }
+        }
+       ]
+      }
+     }
+    ],
+    "step_budget": 65536
+   },
+   "expected": [
+    {
+     "integer": {
+      "value": 107001,
+      "type": {
+       "bits": 64,
+       "signed": true
+      }
+     }
+    }
+   ]
+  },
+  {
+   "id": "roundtrip-max",
+   "request": {
+    "schema_version": "0.1",
+    "target": {
+     "module": "svc.framing",
+     "function": "candidate_frame_roundtrip"
+    },
+    "arguments": [
+     {
+      "sequence": {
+       "values": [
+        {
+         "byte": {
+          "value": 255
+         }
+        },
+        {
+         "byte": {
+          "value": 255
+         }
+        },
+        {
+         "byte": {
+          "value": 255
+         }
+        },
+        {
+         "byte": {
+          "value": 255
+         }
+        }
+       ]
+      }
+     }
+    ],
+    "step_budget": 65536
+   },
+   "expected": [
+    {
+     "integer": {
+      "value": 107001,
+      "type": {
+       "bits": 64,
+       "signed": true
+      }
+     }
+    }
+   ]
+  },
+  {
+   "id": "rejects",
+   "request": {
+    "schema_version": "0.1",
+    "target": {
+     "module": "svc.framing",
+     "function": "candidate_frame_rejects"
+    },
+    "arguments": [],
+    "step_budget": 65536
+   },
+   "expected": [
+    {
+     "integer": {
+      "value": 123456,
+      "type": {
+       "bits": 64,
+       "signed": true
+      }
+     }
+    }
+   ]
+  }
+ ]
+}

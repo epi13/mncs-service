@@ -1,0 +1,52 @@
+{
+ "schema_version": "0.1",
+ "name": "svc-service",
+ "cases": [
+  {
+   "id": "admit",
+   "request": {
+    "schema_version": "0.1",
+    "target": {
+     "module": "svc.service",
+     "function": "candidate_service_admit"
+    },
+    "arguments": [],
+    "step_budget": 65536
+   },
+   "expected": [
+    {
+     "integer": {
+      "value": 112001,
+      "type": {
+       "bits": 64,
+       "signed": true
+      }
+     }
+    }
+   ]
+  },
+  {
+   "id": "complete",
+   "request": {
+    "schema_version": "0.1",
+    "target": {
+     "module": "svc.service",
+     "function": "candidate_service_complete"
+    },
+    "arguments": [],
+    "step_budget": 32768
+   },
+   "expected": [
+    {
+     "integer": {
+      "value": 112002,
+      "type": {
+       "bits": 64,
+       "signed": true
+      }
+     }
+    }
+   ]
+  }
+ ]
+}

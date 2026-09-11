@@ -1,0 +1,29 @@
+mncs 0.13;
+
+// Graceful shutdown story: the full seven-step sequence with virtual
+// instants — signal at 1000, two completions, drained sweep, finish.
+// Every instant is an argument, so the sweep is deterministic without
+// a clock grant (the virtual-time pattern; see pressure SVC-P-008).
+// Receipt packs phase 7 / drained 2 / missed 0 / met to 200004.
+module examples.graceful_shutdown;
+
+use svc.lifecycle;
+use svc.shutdown;
+
+fn run() -> (result: i64) {
+    let t0: svc.lifecycle.Transition = svc.lifecycle.configure(svc.lifecycle.boot());
+    let t1: svc.lifecycle.Transition = svc.lifecycle.start(t0.state);
+    let t2: svc.lifecycle.Transition = svc.lifecycle.mark_ready(t1.state);
+    let live: bool = svc.lifecycle.admits(t2.state);
+    let t3: svc.lifecycle.Transition = svc.lifecycle.begin_drain(t2.state);
+    let closed: bool = !svc.lifecycle.admits(t3.state);
+    let b: svc.shutdown.Step = svc.shutdown.begin(t3.state, 2, 2, 1000, 500);
+    let d1: svc.shutdown.Drain = svc.shutdown.note_done(b.drain, 1);
+    let d2: svc.shutdown.Drain = svc.shutdown.note_done(d1, 1);
+    let s1: svc.shutdown.Step = svc.shutdown.step(d2, 1200);
+    let s2: svc.shutdown.Step = svc.shutdown.finish(s1);
+    let r: svc.shutdown.Receipt = svc.shutdown.snapshot(s2.drain, s1.code == 1);
+    let receipt: bool = r.phase_rank == 7 && r.drained == 2 && r.missed == 0 && r.met;
+    let ok: bool = t0.accepted && t1.accepted && t2.accepted && live && t3.accepted && closed && !b.done && s1.done && s1.code == 1 && s2.done && receipt;
+    return select(ok, 200004, 0 - 1);
+}

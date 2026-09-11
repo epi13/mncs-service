@@ -1,0 +1,29 @@
+{
+ "schema_version": "0.1",
+ "name": "ex_worker_service",
+ "cases": [
+  {
+   "id": "run",
+   "request": {
+    "schema_version": "0.1",
+    "target": {
+     "module": "examples.worker_service",
+     "function": "run"
+    },
+    "arguments": [],
+    "step_budget": 65536
+   },
+   "expected": [
+    {
+     "integer": {
+      "value": 200002,
+      "type": {
+       "bits": 64,
+       "signed": true
+      }
+     }
+    }
+   ]
+  }
+ ]
+}

@@ -1,0 +1,75 @@
+{
+ "schema_version": "0.1",
+ "name": "svc-shutdown",
+ "cases": [
+  {
+   "id": "clean",
+   "request": {
+    "schema_version": "0.1",
+    "target": {
+     "module": "svc.shutdown",
+     "function": "candidate_shutdown_clean"
+    },
+    "arguments": [],
+    "step_budget": 32768
+   },
+   "expected": [
+    {
+     "integer": {
+      "value": 7201,
+      "type": {
+       "bits": 64,
+       "signed": true
+      }
+     }
+    }
+   ]
+  },
+  {
+   "id": "forced",
+   "request": {
+    "schema_version": "0.1",
+    "target": {
+     "module": "svc.shutdown",
+     "function": "candidate_shutdown_forced"
+    },
+    "arguments": [],
+    "step_budget": 32768
+   },
+   "expected": [
+    {
+     "integer": {
+      "value": 7030,
+      "type": {
+       "bits": 64,
+       "signed": true
+      }
+     }
+    }
+   ]
+  },
+  {
+   "id": "misuse",
+   "request": {
+    "schema_version": "0.1",
+    "target": {
+     "module": "svc.shutdown",
+     "function": "candidate_shutdown_misuse"
+    },
+    "arguments": [],
+    "step_budget": 32768
+   },
+   "expected": [
+    {
+     "integer": {
+      "value": 114003,
+      "type": {
+       "bits": 64,
+       "signed": true
+      }
+     }
+    }
+   ]
+  }
+ ]
+}

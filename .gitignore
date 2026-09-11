@@ -1,0 +1,5 @@
+# mncs-service ignores: harness run artifacts only (result JSON,
+# backend artifacts, grant files, ledgers). Corpora, sources, and
+# docs are all checked in.
+target/
+__pycache__/

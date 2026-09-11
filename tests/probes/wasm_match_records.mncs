@@ -1,0 +1,57 @@
+mncs 0.13;
+
+// Backend-differential canary for SVC-P-021.
+//
+// A `match` whose arms build sequence-holding records has corrupted
+// earlier live record reads on mncs-portable-wasm-mvp (returning -1
+// where mncs-research-bytecode returns the source-semantic 1),
+// depending on the compiler build. Self-contained: no imports, so
+// future service edits cannot perturb it. See SVC-P-021 for the
+// build-dependent divergence record; do not restructure this probe
+// around any backend.
+
+module probe.wasm_match_records;
+
+record Env { id: u64, op: u64 }
+
+record Q { slots: [Env; 4], count: u64, refused: u64 }
+
+record E { code: u64 }
+
+record Ad { queue: Q, accepted: bool, err: E }
+
+enum Pol { KEEP, SHED }
+
+fn make(code: u64) -> (result: E) {
+    return E { code: code };
+}
+
+// Match arms construct inline, no calls. Expect 1 if calls are essential.
+fn full_inline(q: Q, pol: Pol) -> (result: Ad) {
+    return match pol {
+        KEEP => Ad { queue: q, accepted: false, err: E { code: 10 } },
+        SHED => Ad { queue: Q { ..q, refused: q.refused +% 1 }, accepted: false, err: E { code: 1 } },
+    };
+}
+
+fn open() -> (result: Q) {
+    let blank: Env = Env { id: 0, op: 0 };
+    return Q { slots: [blank, blank, blank, blank], count: 0, refused: 0 };
+}
+
+fn accept(q: Q, id: u64) -> (result: Ad) {
+    let e: Env = Env { id: id, op: 7 };
+    let slot: u64 = select(q.count < 4, q.count, 0);
+    let grown: Q = Q { ..q, slots: replace(q.slots, slot, e), count: q.count +% 1 };
+    let noerr: E = make(0);
+    return Ad { queue: grown, accepted: true, err: noerr };
+}
+
+fn v_inline() -> (result: i64) {
+    let q0: Q = open();
+    let a1: Ad = accept(q0, 1);
+    let a2: Ad = accept(a1.queue, 2);
+    let a3: Ad = full_inline(a2.queue, Pol.SHED);
+    let ok: bool = a1.accepted && a2.accepted && !a3.accepted && a3.queue.refused == 1;
+    return select(ok, 1, 0 - 1);
+}

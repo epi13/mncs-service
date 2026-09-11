@@ -1,0 +1,33 @@
+mncs 0.13;
+
+// Minimal local service: assemble, bring to READY, admit one request,
+// snapshot. No effects, no transport — the smallest program that threads
+// the full composition (`svc.service`) and proves the happy path packs
+// to 200001.
+module examples.minimal_service;
+
+use svc.lifecycle;
+use svc.errors;
+use svc.queue;
+use svc.worker;
+use svc.contract;
+use svc.observe;
+use svc.config;
+use svc.service;
+
+fn run() -> (result: i64) {
+    let cfg: svc.config.Config = svc.config.defaults();
+    let ping: svc.contract.Op = svc.contract.Op { id: 1, input_words: 3, idempotent: true, pure: true, max_ms: 500 };
+    let c: svc.contract.Contract = svc.contract.contract1(77, ping);
+    let s0: svc.service.Service = svc.service.assemble(cfg, c);
+    let pre: bool = !svc.lifecycle.admits(s0.life);
+    let t0: svc.lifecycle.Transition = svc.lifecycle.configure(s0.life);
+    let t1: svc.lifecycle.Transition = svc.lifecycle.start(t0.state);
+    let t2: svc.lifecycle.Transition = svc.lifecycle.mark_ready(t1.state);
+    let s1: svc.service.Service = svc.service.Service { ..s0, life: t2.state };
+    let env: svc.queue.Envelope = svc.queue.Envelope { id: 1, op: 1, deadline: 9000, arg0: 0, arg1: 0 };
+    let a: svc.service.SAdmit = svc.service.admit_request(s1, env, svc.queue.Shed.REJECT, 1000);
+    let snap: svc.service.Snap = svc.service.snapshot(a.service);
+    let ok: bool = pre && t0.accepted && t1.accepted && t2.accepted && a.accepted && snap.phase_rank == 3 && snap.health_rank == 0 && snap.admitted == 1 && snap.depth == 1 && svc.service.valid(a.service);
+    return select(ok, 200001, 0 - 1);
+}

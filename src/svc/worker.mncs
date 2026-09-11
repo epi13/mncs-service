@@ -1,0 +1,321 @@
+mncs 0.13;
+
+// svc.worker — bounded worker pool with explicit dispatch and reaping.
+//
+// A `Pool` owns a fixed set of worker slots (at most 8). Each slot is a
+// small state machine: IDLE -> BUSY -> DONE | FAILED, with FAILED slots
+// explicitly `requeue`d (after a retry decision upstream) or `retire`d.
+// Bounded concurrency falls out of the slot count: `dispatch` reports
+// `accepted = false` when no IDLE slot exists within `size`, which is
+// the pool-level backpressure signal.
+//
+// Jobs are u64 tokens (request ids issued by `svc.queue` admission); the
+// pool owns scheduling state, never payload bytes (see `svc.queue` for
+// the rationale). Timeouts are observed, not awaited: `reap` converts
+// BUSY slots older than `timeout` ms into FAILED with a code the
+// orchestrator can route to `svc.retry`. Child failure policy is data
+// (`FailPolicy.abort_pool`): abort stops further dispatch, it never
+// kills running slots — cancellation stays cooperative at step
+// boundaries, mirroring `mncs.std.scope.v1`.
+module svc.worker;
+
+enum WState { IDLE, BUSY, DONE, FAILED }
+
+record Worker { state: WState, job: u64, started: u64, attempts: u64, note: u64 }
+
+record Pool {
+    slots: [Worker; 8],
+    size: u64,
+    completed: u64,
+    failed: u64,
+    aborted: bool
+}
+
+record Dispatch { pool: Pool, worker: u64, accepted: bool }
+
+record Settle { pool: Pool, accepted: bool }
+
+record Reap { pool: Pool, reaped: u64 }
+
+// Child failure policy: when `abort_pool` is set, the first FAILED
+// settle marks the pool aborted and further dispatch is refused until
+// `clear_abort`. Otherwise failures are counted and dispatch continues.
+record FailPolicy { abort_pool: bool, max_attempts: u64 }
+
+// Open a pool with `size` worker slots (clamped 1..=8). All slots IDLE.
+fn open(size: u64) -> (result: Pool) {
+    let capped: u64 = select(size <= 8, size, 8);
+    let clamped: u64 = select(capped >= 1, capped, 1);
+    let idle: Worker = Worker { state: WState.IDLE, job: 0, started: 0, attempts: 0, note: 0 };
+    return Pool {
+        slots: [idle, idle, idle, idle, idle, idle, idle, idle],
+        size: clamped,
+        completed: 0,
+        failed: 0,
+        aborted: false
+    };
+}
+
+// Structural invariant: size in range, every slot beyond size IDLE,
+// DONE/FAILED slots counted exactly once. The counting half is checked
+// by corpora over operation sequences; this predicate checks the shape
+// half (sizes and out-of-range slots).
+fn valid(p: Pool) -> (result: bool) {
+    let seed: ValidFold = ValidFold { ok: true };
+    iterate i over p.slots carrying st: ValidFold = seed {
+        let slot: u64 = select(i < 8, i, 0);
+        let beyond: bool = i >= p.size;
+        let probe: Worker = p.slots[slot];
+        let idle: bool = match probe.state {
+            IDLE => true,
+            BUSY => false,
+            DONE => false,
+            FAILED => false,
+        };
+        next st = ValidFold { ok: st.ok && select(beyond, idle, true) };
+    }
+    return p.size >= 1 && p.size <= 8 && st.ok;
+}
+
+record ValidFold { ok: bool }
+
+// Number of BUSY slots. Bounded fold, total.
+fn busy(p: Pool) -> (result: u64) {
+    iterate i over p.slots carrying n: u64 = 0 {
+        let slot: u64 = select(i < 8, i, 0);
+        let live: bool = i < p.size;
+        let probe: Worker = p.slots[slot];
+        let is_busy: bool = match probe.state {
+            IDLE => false,
+            BUSY => true,
+            DONE => false,
+            FAILED => false,
+        };
+        next n = select(live && is_busy, n +% 1, n);
+    }
+    return n;
+}
+
+// Dispatch `job` onto the first IDLE slot within `size`, stamped with
+// `now`. Refused when aborted, when no slot is free, or when `size` is
+// somehow zero. `worker` is the slot index, or 8 when refused.
+fn dispatch(p: Pool, job: u64, now: u64) -> (result: Dispatch) {
+    if p.aborted {
+        return Dispatch { pool: p, worker: 8, accepted: false };
+    } else {
+    }
+    let seed: PickFold = PickFold { found: 8 };
+    iterate i over p.slots carrying st: PickFold = seed {
+        let slot: u64 = select(i < 8, i, 0);
+        let live: bool = i < p.size;
+        let probe: Worker = p.slots[slot];
+        let idle: bool = match probe.state {
+            IDLE => true,
+            BUSY => false,
+            DONE => false,
+            FAILED => false,
+        };
+        let take: bool = live && idle && st.found == 8;
+        next st = PickFold { found: select(take, i, st.found) };
+    }
+    if st.found == 8 {
+        return Dispatch { pool: p, worker: 8, accepted: false };
+    } else {
+    }
+    let w: Worker = Worker { state: WState.BUSY, job: job, started: now, attempts: 0, note: 0 };
+    return Dispatch {
+        pool: Pool { ..p, slots: replace(p.slots, st.found, w) },
+        worker: st.found,
+        accepted: true
+    };
+}
+
+record PickFold { found: u64 }
+
+// Settle a BUSY slot as done or failed. Only BUSY slots settle; anything
+// else leaves the pool unchanged and reports rejected, so double-settle
+// is observable, not fatal. A FAILED settle under an aborting policy
+// marks the pool aborted.
+fn settle(p: Pool, worker: u64, ok: bool, code: u64, policy: FailPolicy) -> (result: Settle) {
+    if worker >= p.size {
+        return Settle { pool: p, accepted: false };
+    } else {
+    }
+    let cur: Worker = p.slots[worker];
+    let is_busy: bool = match cur.state {
+        IDLE => false,
+        BUSY => true,
+        DONE => false,
+        FAILED => false,
+    };
+    if !is_busy {
+        return Settle { pool: p, accepted: false };
+    } else {
+    }
+    if ok {
+        let done: Worker = Worker { state: WState.DONE, job: cur.job, started: cur.started, attempts: cur.attempts, note: code };
+        return Settle {
+            pool: Pool { ..p, slots: replace(p.slots, worker, done), completed: p.completed +% 1 },
+            accepted: true
+        };
+    } else {
+    }
+    let failed: Worker = Worker { state: WState.FAILED, job: cur.job, started: cur.started, attempts: cur.attempts +% 1, note: code };
+    let abort: bool = policy.abort_pool;
+    return Settle {
+        pool: Pool {
+            ..p,
+            slots: replace(p.slots, worker, failed),
+            failed: p.failed +% 1,
+            aborted: select(abort, true, p.aborted)
+        },
+        accepted: true
+    };
+}
+
+// Requeue a FAILED slot for another attempt (IDLE, attempts preserved)
+// when the retry policy allows it. The retry *decision* lives upstream
+// (`svc.retry.should_retry`); this only performs the reset.
+fn requeue(p: Pool, worker: u64) -> (result: Settle) {
+    if worker >= p.size {
+        return Settle { pool: p, accepted: false };
+    } else {
+    }
+    let cur: Worker = p.slots[worker];
+    let is_failed: bool = match cur.state {
+        IDLE => false,
+        BUSY => false,
+        DONE => false,
+        FAILED => true,
+    };
+    if !is_failed {
+        return Settle { pool: p, accepted: false };
+    } else {
+    }
+    let idle: Worker = Worker { state: WState.IDLE, job: 0, started: 0, attempts: cur.attempts, note: cur.note };
+    return Settle { pool: Pool { ..p, slots: replace(p.slots, worker, idle) }, accepted: true };
+}
+
+// Retire a DONE or FAILED slot back to IDLE, releasing it for dispatch.
+// BUSY slots cannot be retired: preemption does not exist here.
+fn retire(p: Pool, worker: u64) -> (result: Settle) {
+    if worker >= p.size {
+        return Settle { pool: p, accepted: false };
+    } else {
+    }
+    let cur: Worker = p.slots[worker];
+    let releasable: bool = match cur.state {
+        IDLE => false,
+        BUSY => false,
+        DONE => true,
+        FAILED => true,
+    };
+    if !releasable {
+        return Settle { pool: p, accepted: false };
+    } else {
+    }
+    let idle: Worker = Worker { state: WState.IDLE, job: 0, started: 0, attempts: 0, note: 0 };
+    return Settle { pool: Pool { ..p, slots: replace(p.slots, worker, idle) }, accepted: true };
+}
+
+// Clear an abort so dispatch may resume after the operator has handled
+// the failure. Explicit because resuming after abort is a decision.
+fn clear_abort(p: Pool) -> (result: Pool) {
+    return Pool { ..p, aborted: false };
+}
+
+// Reap BUSY slots older than `timeout` ms at `now` into FAILED (code 7
+// = worker timeout). Reports how many were reaped. Under an aborting
+// policy the first reap also aborts the pool.
+fn reap(p: Pool, now: u64, timeout: u64, policy: FailPolicy) -> (result: Reap) {
+    let seed: ReapFold = ReapFold { slots: p.slots, reaped: 0 };
+    iterate i over p.slots carrying st: ReapFold = seed {
+        let slot: u64 = select(i < 8, i, 0);
+        let live: bool = i < p.size;
+        let cur: Worker = st.slots[slot];
+        let is_busy: bool = match cur.state {
+            IDLE => false,
+            BUSY => true,
+            DONE => false,
+            FAILED => false,
+        };
+        let age: u64 = select(now >= cur.started, now -% cur.started, 0);
+        let stale: bool = live && is_busy && age > timeout;
+        let timed_out: Worker = Worker { state: WState.FAILED, job: cur.job, started: cur.started, attempts: cur.attempts +% 1, note: 7 };
+        let failed: Worker = timed_out;
+        next st = ReapFold {
+            slots: select(stale, replace(st.slots, slot, failed), st.slots),
+            reaped: select(stale, st.reaped +% 1, st.reaped)
+        };
+    }
+    let abort: bool = policy.abort_pool && st.reaped > 0;
+    return Reap {
+        pool: Pool {
+            ..p,
+            slots: st.slots,
+            failed: p.failed +% st.reaped,
+            aborted: select(abort, true, p.aborted)
+        },
+        reaped: st.reaped
+    };
+}
+
+record ReapFold { slots: [Worker; 8], reaped: u64 }
+
+// --- Executable test entries ---
+
+// Pool flow on 2 slots: dispatch fills, third refuses, settle/retire
+// recycle, failure requeues, invariant holds. Packs to 106001.
+fn candidate_worker_flow() -> (result: i64) {
+    let graded: FailPolicy = FailPolicy { abort_pool: false, max_attempts: 3 };
+    let p0: Pool = open(2);
+    let d0: Dispatch = dispatch(p0, 11, 100);
+    let d1: Dispatch = dispatch(d0.pool, 22, 110);
+    let d2: Dispatch = dispatch(d1.pool, 33, 120);
+    let filled: bool = d0.accepted && d0.worker == 0 && d1.accepted && d1.worker == 1 && !d2.accepted && d2.worker == 8;
+    let saturated: bool = busy(d2.pool) == 2 && valid(d2.pool);
+    let s0: Settle = settle(d2.pool, 0, true, 0, graded);
+    let done_ok: bool = s0.accepted && s0.pool.completed == 1;
+    let s1: Settle = settle(s0.pool, 0, true, 0, graded);
+    let no_double: bool = !s1.accepted;
+    let r0: Settle = retire(s1.pool, 0);
+    let d3: Dispatch = dispatch(r0.pool, 33, 130);
+    let recycled: bool = r0.accepted && d3.accepted && d3.worker == 0;
+    let s2: Settle = settle(d3.pool, 1, false, 5, graded);
+    let failed: bool = s2.accepted && s2.pool.failed == 1 && !s2.pool.aborted;
+    let q0: Settle = requeue(s2.pool, 1);
+    let d4: Dispatch = dispatch(q0.pool, 44, 140);
+    let requeued: bool = q0.accepted && d4.accepted && d4.worker == 1;
+    let ok: bool = filled && saturated && done_ok && no_double && recycled && failed && requeued && valid(d4.pool);
+    return select(ok, 106001, 0 - 1);
+}
+
+// Timeout reaping: a stale BUSY slot fails with code 7; abort policy
+// stops dispatch until cleared. Dispatched at 100, swept at 5000 with
+// timeout 1000. Packs to 106002.
+fn candidate_worker_reap() -> (result: i64) {
+    let graded: FailPolicy = FailPolicy { abort_pool: false, max_attempts: 3 };
+    let strict: FailPolicy = FailPolicy { abort_pool: true, max_attempts: 1 };
+    let p0: Pool = open(2);
+    let d0: Dispatch = dispatch(p0, 11, 100);
+    let d1: Dispatch = dispatch(d0.pool, 22, 4900);
+    let r0: Reap = reap(d1.pool, 5000, 1000, graded);
+    let one_stale: bool = r0.reaped == 1 && r0.pool.failed == 1 && busy(r0.pool) == 1;
+    let swept: Pool = r0.pool;
+    let kept: Worker = swept.slots[1];
+    let survivor: bool = kept.job == 22;
+    let timed: Worker = swept.slots[0];
+    let coded: bool = timed.note == 7;
+    let r1: Reap = reap(r0.pool, 5000, 1000, strict);
+    let aborted: bool = r1.reaped == 0 && !r1.pool.aborted;
+    let free0: Settle = retire(r1.pool, 0);
+    let d2: Dispatch = dispatch(free0.pool, 55, 5100);
+    let room: bool = free0.accepted && d2.accepted && d2.worker == 0;
+    let r2: Reap = reap(d2.pool, 7000, 1000, strict);
+    let stops: bool = r2.reaped == 2 && r2.pool.aborted;
+    let d3: Dispatch = dispatch(r2.pool, 66, 7100);
+    let halted: bool = !d3.accepted;
+    let clear: Pool = clear_abort(r2.pool);
+    let ok: bool = d0.accepted && d1.accepted && one_stale && survivor && coded && aborted && room && stops && halted && !clear.aborted;
+    return select(ok, 106002, 0 - 1);
+}

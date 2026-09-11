@@ -1,0 +1,29 @@
+{
+ "schema_version": "0.1",
+ "name": "svc-time",
+ "cases": [
+  {
+   "id": "deadlines",
+   "request": {
+    "schema_version": "0.1",
+    "target": {
+     "module": "svc.time",
+     "function": "candidate_time"
+    },
+    "arguments": [],
+    "step_budget": 4096
+   },
+   "expected": [
+    {
+     "integer": {
+      "value": 104001,
+      "type": {
+       "bits": 64,
+       "signed": true
+      }
+     }
+    }
+   ]
+  }
+ ]
+}

@@ -1,0 +1,75 @@
+mncs 0.13;
+
+// svc.time — deadline arithmetic over explicit instants.
+//
+// Time enters only as u64 millisecond arguments. Nothing here reads a
+// clock: edge code observes `clock_read()` once per step and threads the
+// instant through these pure helpers, which is what makes every deadline
+// decision deterministically testable with virtual instants (see pressure
+// SVC-P-008 for why the clock itself cannot yet be virtualized).
+//
+// Overflow discipline: `deadline_at` wraps (`+%`). A wrapped deadline is
+// *earlier* than `now`, so `expired` reports it immediately — fail-closed
+// toward "no time left" rather than "infinite time". Callers with
+// near-wrap budgets must use `remaining_ms`, which saturates instead of
+// wrapping.
+module svc.time;
+
+use mncs.std.clock.v1 as clock;
+
+// Absolute deadline `budget` ms after `now`. Wraps on overflow; see the
+// module note for why wrapping fails closed through `expired`.
+fn deadline_at(now: u64, budget: u64) -> (result: u64) {
+    return now +% budget;
+}
+
+// Milliseconds from `now` until `deadline`, saturating at zero. Never
+// wraps: a passed deadline reads as zero time left.
+fn remaining_ms(deadline: u64, now: u64) -> (result: u64) {
+    return select(now >= deadline, 0, deadline -% now);
+}
+
+// True when `now` has reached `deadline` (inclusive: the exact instant
+// of the deadline has expired). Delegates to the stdlib relational
+// definition so there is exactly one timeout comparison in the tree.
+fn expired(deadline: u64, now: u64) -> (result: bool) {
+    return clock.expired(deadline, now);
+}
+
+// Elapsed milliseconds from `since` to `now`, floored at zero so skewed
+// (future-dated) observations read as zero age, never a wrap.
+fn elapsed_ms(since: u64, now: u64) -> (result: u64) {
+    return clock.elapsed(since, now);
+}
+
+// Freshness window: true when the observation stored at `stored` is at
+// most `budget` ms old at `now`.
+fn fresh_within(stored: u64, now: u64, budget: u64) -> (result: bool) {
+    return clock.fresh_within(stored, now, budget);
+}
+
+// Admission-budget check for one more attempt: true when `delay` ms of
+// backoff starting at `now` still land strictly before `deadline`.
+// Guards the wrap: a passed or exactly-reached deadline refuses.
+fn backoff_fits(now: u64, delay: u64, deadline: u64) -> (result: bool) {
+    if now >= deadline {
+        return false;
+    } else {
+    }
+    return now +% delay <= deadline;
+}
+
+// --- Executable test entries ---
+
+// Deadline arithmetic, saturation, inclusivity, and skew floors.
+// Packs to 104001.
+fn candidate_time() -> (result: i64) {
+    let absolute: bool = deadline_at(1000, 500) == 1500;
+    let remaining: bool = remaining_ms(1500, 1000) == 500 && remaining_ms(1000, 1500) == 0 && remaining_ms(1000, 1000) == 0;
+    let inclusive: bool = expired(1000, 1000) && !expired(1000, 999);
+    let skew: bool = elapsed_ms(900, 1000) == 100 && elapsed_ms(1000, 900) == 0;
+    let windows: bool = fresh_within(700, 1000, 500) && !fresh_within(100, 1000, 500);
+    let fits: bool = backoff_fits(1000, 400, 1500) && backoff_fits(1000, 500, 1500) && !backoff_fits(1000, 501, 1500) && !backoff_fits(1500, 0, 1500) && !backoff_fits(1600, 0, 1500);
+    let ok: bool = absolute && remaining && inclusive && skew && windows && fits;
+    return select(ok, 104001, 0 - 1);
+}

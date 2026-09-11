@@ -1,0 +1,43 @@
+mncs 0.13;
+
+// Concurrent worker service: two jobs flow through a composed service
+// with a 2-slot pool — admit, dispatch, settle, snapshot. Pure: the
+// "concurrency" is the pool's explicit scheduling state (bounded,
+// inspectable, deterministic), driven here by straight-line steps and
+// by a host scheduler in production (see pressure SVC-P-001).
+// Packs to 200002.
+module examples.worker_service;
+
+use svc.lifecycle;
+use svc.errors;
+use svc.queue;
+use svc.worker;
+use svc.contract;
+use svc.observe;
+use svc.config;
+use svc.service;
+
+fn run() -> (result: i64) {
+    let cfg: svc.config.Config = svc.config.Config { port: 8080, workers: 2, queue_cap: 8, deadline_ms: 5000, max_frame: 61, max_attempts: 3 };
+    let job: svc.contract.Op = svc.contract.Op { id: 1, input_words: 3, idempotent: true, pure: false, max_ms: 500 };
+    let c: svc.contract.Contract = svc.contract.contract1(7, job);
+    let s0: svc.service.Service = svc.service.assemble(cfg, c);
+    let t0: svc.lifecycle.Transition = svc.lifecycle.configure(s0.life);
+    let t1: svc.lifecycle.Transition = svc.lifecycle.start(t0.state);
+    let t2: svc.lifecycle.Transition = svc.lifecycle.mark_ready(t1.state);
+    let s1: svc.service.Service = svc.service.Service { ..s0, life: t2.state };
+    let e1: svc.queue.Envelope = svc.queue.Envelope { id: 11, op: 1, deadline: 9000, arg0: 0, arg1: 0 };
+    let e2: svc.queue.Envelope = svc.queue.Envelope { id: 22, op: 1, deadline: 9000, arg0: 0, arg1: 0 };
+    let a1: svc.service.SAdmit = svc.service.admit_request(s1, e1, svc.queue.Shed.REJECT, 1000);
+    let a2: svc.service.SAdmit = svc.service.admit_request(a1.service, e2, svc.queue.Shed.REJECT, 1010);
+    let d0: svc.worker.Dispatch = svc.worker.dispatch(a2.service.pool, 11, 1020);
+    let s2: svc.service.Service = svc.service.Service { ..a2.service, pool: d0.pool };
+    let d1: svc.worker.Dispatch = svc.worker.dispatch(s2.pool, 22, 1030);
+    let s3: svc.service.Service = svc.service.Service { ..s2, pool: d1.pool };
+    let graded: svc.worker.FailPolicy = svc.worker.FailPolicy { abort_pool: false, max_attempts: 3 };
+    let c0: svc.service.SettleOut = svc.service.complete_job(s3, 0, true, 0, 1040, graded);
+    let c1: svc.service.SettleOut = svc.service.complete_job(c0.service, 1, false, 5, 1050, graded);
+    let snap: svc.service.Snap = svc.service.snapshot(c1.service);
+    let ok: bool = a1.accepted && a2.accepted && d0.accepted && d1.accepted && c0.accepted && c1.accepted && snap.completed == 1 && snap.failed == 1 && snap.admitted == 2 && snap.phase_rank == 3;
+    return select(ok, 200002, 0 - 1);
+}

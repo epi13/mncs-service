@@ -1,0 +1,18 @@
+{
+ "schema_version": "0.1",
+ "name": "ex_observable",
+ "cases": [
+  {
+   "id": "report",
+   "request": {
+    "schema_version": "0.1",
+    "target": {
+     "module": "examples.observable_service",
+     "function": "report"
+    },
+    "arguments": [],
+    "step_budget": 65536
+   }
+  }
+ ]
+}

@@ -1,0 +1,85 @@
+mncs 0.13;
+
+// svc.retry — explicit bounded retry policy as data.
+//
+// A `Policy` is a plain value: maximum attempts, base delay, delay ceiling,
+// and a shift cap bounding the exponential growth. There is no implicit
+// retry anywhere: callers compute `delay_for` and `should_retry` and drive
+// the loop themselves (currently in the host runtime simulator; natively
+// once the language gains scheduling — see pressure SVC-P-001).
+//
+// All arithmetic is total: shifts saturate at the ceiling, attempt counts
+// saturate rather than wrap, and a zero `max_attempts` means "never retry"
+// without a special case. Jitter is deliberately absent from this version:
+// deterministic delays keep corpora reproducible, and jitter without a
+// randomness capability would be dishonest (see pressure SVC-P-015).
+module svc.retry;
+
+use svc.errors;
+
+record Policy { max_attempts: u64, base_ms: u64, max_ms: u64, shift_cap: u64 }
+
+// Constructor with a sane shape; callers needing other shapes build the
+// record directly. `shift_cap` bounds the doubling so `delay_for` stays
+// within `max_ms` for every attempt on every backend.
+fn policy(max_attempts: u64, base_ms: u64, max_ms: u64) -> (result: Policy) {
+    return Policy { max_attempts: max_attempts, base_ms: base_ms, max_ms: max_ms, shift_cap: 6 };
+}
+
+// Exponential delay for `attempt` (0-based: the delay *before* attempt
+// number `attempt + 1`): base_ms * 2^min(attempt, shift_cap), capped at
+// max_ms. The counted loop always runs exactly 6 steps (the constructor's
+// shift cap) and masks inactive steps with `select`, so the bound is
+// static and the function is total for every u64 attempt. Policies with
+// a larger shift_cap still double at most 6 times per call.
+fn delay_for(p: Policy, attempt: u64) -> (result: u64) {
+    let shift: u64 = select(attempt < p.shift_cap, attempt, p.shift_cap);
+    iterate i up_to 6 carrying acc: u64 = p.base_ms {
+        let active: bool = i < shift;
+        let doubled: u64 = acc +% acc;
+        let capped: u64 = select(doubled <= p.max_ms, doubled, p.max_ms);
+        next acc = select(active, capped, acc);
+    }
+    return select(acc <= p.max_ms, acc, p.max_ms);
+}
+
+// Attempts still available given `made` attempts already performed.
+// Saturates at zero: making more attempts than the policy allows is
+// observable (left == 0), never a wrap.
+fn attempts_left(p: Policy, made: u64) -> (result: u64) {
+    return select(made >= p.max_attempts, 0, p.max_attempts -% made);
+}
+
+// Deadline-aware retry gate. Retrying is allowed exactly when all three
+// hold: the error class is retryable, attempts remain, and the next
+// attempt's backoff still fits before `deadline` (checked with wrapping
+// arithmetic made safe by testing `now >= deadline` first). A zero
+// `max_attempts` policy therefore refuses every retry, including the
+// first: callers that want "try once, never retry" use max_attempts = 1.
+fn should_retry(p: Policy, e: svc.errors.Error, made: u64, now: u64, deadline: u64) -> (result: bool) {
+    let class_ok: bool = svc.errors.retryable(e);
+    let budget_ok: bool = made < p.max_attempts;
+    let live: bool = now < deadline;
+    let wait: u64 = delay_for(p, made);
+    let fits: bool = select(live, now +% wait <= deadline, false);
+    return class_ok && budget_ok && fits;
+}
+
+// --- Executable test entries ---
+
+// Backoff curve, attempt budgets, and the deadline-aware retry gate.
+// Policy: max 3 attempts, base 10 ms, ceiling 1000 ms. Delays for
+// attempts 0..=4 run 10/20/40/80/160; attempt 6+ pins at 640 by the
+// shift cap. Packs to 103001.
+fn candidate_retry() -> (result: i64) {
+    let p: Policy = policy(3, 10, 1000);
+    let curve: bool = delay_for(p, 0) == 10 && delay_for(p, 1) == 20 && delay_for(p, 2) == 40 && delay_for(p, 3) == 80 && delay_for(p, 4) == 160 && delay_for(p, 6) == 640 && delay_for(p, 10) == 640;
+    let budgets: bool = attempts_left(p, 0) == 3 && attempts_left(p, 2) == 1 && attempts_left(p, 3) == 0 && attempts_left(p, 9) == 0;
+    let transient: svc.errors.Error = svc.errors.make(svc.errors.Class.TRANSIENT, 1);
+    let permanent: svc.errors.Error = svc.errors.make(svc.errors.Class.PERMANENT, 2);
+    let gate: bool = should_retry(p, transient, 0, 1000, 5000) && !should_retry(p, permanent, 0, 1000, 5000) && !should_retry(p, transient, 3, 1000, 5000) && should_retry(p, transient, 0, 4900, 5000) && !should_retry(p, transient, 0, 4995, 5000) && !should_retry(p, transient, 0, 5000, 5000);
+    let zero: Policy = policy(0, 10, 1000);
+    let never: bool = !should_retry(zero, transient, 0, 0, 5000) && attempts_left(zero, 0) == 0;
+    let ok: bool = curve && budgets && gate && never;
+    return select(ok, 103001, 0 - 1);
+}

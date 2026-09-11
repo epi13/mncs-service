@@ -1,0 +1,140 @@
+mncs 0.13;
+
+// svc.errors — typed service errors. Errors never collapse into strings.
+//
+// An `Error` carries three machine-readable fields: a coarse `Class` that
+// decides policy (retry, shed, escalate), a fine `code` scoped to the
+// reporting component, and `attempts` recording how many times the failed
+// operation has been tried. Causal chains longer than one link cannot be
+// represented in current MNCS (no recursive types; see pressure SVC-P-010),
+// so multi-hop causality is carried as escalating codes, not linked values.
+//
+// Class semantics (the contract every consumer may rely on):
+// - TRANSIENT: may succeed on retry without any change (e.g. momentary
+//   unavailability). Retryable.
+// - TIMEOUT: the operation exceeded its deadline. Retryable while the
+//   enclosing deadline still permits (see `svc.retry.should_retry`).
+// - DEPENDENCY: a declared dependency failed. Retryable: the dependency
+//   may recover, and the retry policy bounds the wait.
+// - OVERLOAD: local admission control refused or shed the work. Retryable
+//   by the *caller* after backoff; the overloaded service must not
+//   self-retry (that would amplify the overload).
+// - PERMANENT: retrying is semantically unsafe or futile (bad request,
+//   invariant violation, exhausted policy). Never retried.
+// - PROTOCOL: the peer violated the protocol (bad frame, unknown op).
+//   Never retried against the same peer state; the connection is suspect.
+// - RESOURCE: a local resource is exhausted or broken (no memory, corrupt
+//   store). Never blindly retried; requires operator/recovery action.
+// - CANCELLED: the work was cancelled. Never retried implicitly; only an
+//   explicit caller re-issue may recreate it.
+module svc.errors;
+
+enum Class {
+    TRANSIENT,
+    PERMANENT,
+    TIMEOUT,
+    CANCELLED,
+    DEPENDENCY,
+    PROTOCOL,
+    RESOURCE,
+    OVERLOAD
+}
+
+record Error { class: Class, code: u64, attempts: u64 }
+
+// Constructor: first observation of a failure carries attempts = 0.
+fn make(class: Class, code: u64) -> (result: Error) {
+    return Error { class: class, code: code, attempts: 0 };
+}
+
+// Record one more attempt of the same operation. Attempt counting is
+// wrapping: a caller that lets attempts wrap has already violated its
+// retry policy, and the policy check (`attempts < max`) fails safe by
+// treating wrapped values as exhausted only when max is sane — policies
+// must keep max_attempts far below wrap for this to hold (documented in
+// `svc.retry`; see pressure SVC-P-010 for bounded-nat discussion).
+fn with_attempt(e: Error) -> (result: Error) {
+    return Error { ..e, attempts: e.attempts +% 1 };
+}
+
+// Policy predicate: may this error be retried at all, ignoring budgets.
+// Budgets (attempt counts, deadlines) are applied by `svc.retry`.
+fn retryable(e: Error) -> (result: bool) {
+    return match e.class {
+        TRANSIENT => true,
+        PERMANENT => false,
+        TIMEOUT => true,
+        CANCELLED => false,
+        DEPENDENCY => true,
+        PROTOCOL => false,
+        RESOURCE => false,
+        OVERLOAD => true,
+    };
+}
+
+// True once the error has consumed `max` attempts. Wraps safely: an
+// attempts count that already exceeds max stays exhausted.
+fn exhausted(e: Error, max: u64) -> (result: bool) {
+    return e.attempts >= max;
+}
+
+// Escalate a still-failing error past its attempt budget into PERMANENT,
+// preserving the code and count as evidence. Retry loops call this on
+// their terminal failure so "gave up" is distinguishable from "failed".
+fn escalate(e: Error, max: u64) -> (result: Error) {
+    if exhausted(e, max) {
+        return Error { class: Class.PERMANENT, code: e.code, attempts: e.attempts };
+    } else {
+    }
+    return e;
+}
+
+// Caller-side overload discipline: an OVERLOAD error must be answered
+// with backoff by the caller, never with an immediate re-issue. This
+// predicate identifies that case so generic retry loops can route it to
+// the backoff path even when the error is otherwise retryable.
+fn needs_caller_backoff(e: Error) -> (result: bool) {
+    return match e.class {
+        TRANSIENT => false,
+        PERMANENT => false,
+        TIMEOUT => false,
+        CANCELLED => false,
+        DEPENDENCY => false,
+        PROTOCOL => false,
+        RESOURCE => false,
+        OVERLOAD => true,
+    };
+}
+
+// Timeout classification helper: pure relational check so deadline logic
+// stays testable without a clock (pass `now` explicitly; only edge code
+// calls `clock_read`).
+fn deadline_passed(now: u64, deadline: u64) -> (result: bool) {
+    return now >= deadline;
+}
+
+// --- Executable test entries ---
+
+// Class policy matrix, attempt counting, escalation, and deadline edge.
+// Packs to 102001.
+fn candidate_errors() -> (result: i64) {
+    let tr: Error = make(Class.TRANSIENT, 1);
+    let pe: Error = make(Class.PERMANENT, 2);
+    let to: Error = make(Class.TIMEOUT, 3);
+    let ca: Error = make(Class.CANCELLED, 4);
+    let de: Error = make(Class.DEPENDENCY, 5);
+    let pr: Error = make(Class.PROTOCOL, 6);
+    let re: Error = make(Class.RESOURCE, 7);
+    let ov: Error = make(Class.OVERLOAD, 8);
+    let policy: bool = retryable(tr) && !retryable(pe) && retryable(to) && !retryable(ca) && retryable(de) && !retryable(pr) && !retryable(re) && retryable(ov);
+    let backoff: bool = needs_caller_backoff(ov) && !needs_caller_backoff(tr) && !needs_caller_backoff(pe);
+    let counted: Error = with_attempt(with_attempt(tr));
+    let counts: bool = counted.attempts == 2 && !exhausted(counted, 3) && exhausted(counted, 2) && exhausted(counted, 0);
+    let esc: Error = escalate(counted, 2);
+    let gave_up: bool = !retryable(esc) && esc.code == 1 && esc.attempts == 2;
+    let kept: Error = escalate(counted, 5);
+    let kept_retryable: bool = retryable(kept) && kept.attempts == 2;
+    let edges: bool = deadline_passed(100, 100) && !deadline_passed(99, 100);
+    let ok: bool = policy && backoff && counts && gave_up && kept_retryable && edges;
+    return select(ok, 102001, 0 - 1);
+}

@@ -1,0 +1,296 @@
+mncs 0.13;
+
+// svc.queue — bounded request queue with explicit backpressure.
+//
+// A `Queue` is a fixed-capacity FIFO of request `Envelope` values. The
+// envelope is deliberately a fixed-shape token: identity, operation,
+// deadline, and two argument words. Request *bytes* live in host buffers
+// referenced by `id`; the queue owns ordering, admission, and pressure —
+// the three things that must stay in-language for backpressure to be
+// checkable (see pressures SVC-P-006 and SVC-P-009 for why payloads stay
+// referenced rather than owned).
+//
+// Backpressure is data, never blocking: `admit` reports `accepted` and,
+// when the queue is full, applies the caller's `Shed` policy and reports
+// what it did. Counters (`admitted`, `refused`, `shed`, `high`) make
+// saturation observable to `svc.observe` without any out-of-band channel.
+//
+// The shift-on-dequeue follows the `mncs.std.channel.v1` precedent:
+// functional `replace` over a fixed backing array, FIFO order, no
+// sentinels (`Dequeue.found` says whether `head` is meaningful).
+module svc.queue;
+
+use svc.errors;
+
+// Admission outcome when the queue is full. REJECT refuses the newcomer
+// (callers back off); DROP_NEWEST counts the newcomer as shed work;
+// DROP_OLDEST evicts the head to make room (bounded loss, counted).
+enum Shed { REJECT, DROP_NEWEST, DROP_OLDEST }
+
+// One queued request. `deadline` is an absolute millisecond instant in
+// the same domain as `svc.time`; `arg0`/`arg1` are scalar arguments or
+// host-buffer handles, by operation contract (`svc.contract`).
+record Envelope { id: u64, op: u64, deadline: u64, arg0: u64, arg1: u64 }
+
+record Queue {
+    slots: [Envelope; 8],
+    count: u64,
+    capacity: u64,
+    admitted: u64,
+    refused: u64,
+    shed: u64,
+    high: u64
+}
+
+record Admit { queue: Queue, accepted: bool, shed_head: bool, error: svc.errors.Error }
+
+record Dequeue { queue: Queue, found: bool, head: Envelope }
+
+// Open a queue holding up to `capacity` envelopes (clamped 1..=8).
+// Counters start at zero; `high` tracks the high-water mark.
+fn open(capacity: u64) -> (result: Queue) {
+    let cap: u64 = select(capacity <= 8, capacity, 8);
+    let clamped: u64 = select(cap >= 1, cap, 1);
+    let blank: Envelope = Envelope { id: 0, op: 0, deadline: 0, arg0: 0, arg1: 0 };
+    return Queue {
+        slots: [blank, blank, blank, blank, blank, blank, blank, blank],
+        count: 0,
+        capacity: clamped,
+        admitted: 0,
+        refused: 0,
+        shed: 0,
+        high: 0
+    };
+}
+
+// Structural invariant as a boolean function: capacity in range, count
+// within capacity, high-water mark consistent. Corpora assert this after
+// every operation sequence; a future proof kernel would discharge the
+// same predicate statically (see pressure SVC-P-016).
+fn valid(q: Queue) -> (result: bool) {
+    return q.capacity >= 1 && q.capacity <= 8 && q.count <= q.capacity && q.count <= q.high && q.high <= q.capacity;
+}
+
+fn full(q: Queue) -> (result: bool) {
+    return q.count >= q.capacity;
+}
+
+fn depth(q: Queue) -> (result: u64) {
+    return q.count;
+}
+
+// Pressure class for admission control and observability: 0 = room,
+// 1 = at least half full, 2 = full. Integer math, total, no floats.
+fn pressure(q: Queue) -> (result: u64) {
+    if full(q) {
+        return 2;
+    } else {
+    }
+    return select(q.count +% q.count >= q.capacity, 1, 0);
+}
+
+// Admit one envelope under `policy`. When room exists the envelope lands
+// at the tail and the high-water mark advances. When full, the policy
+// decides: REJECT and DROP_NEWEST both refuse the newcomer (counted as
+// `refused` vs `shed`); DROP_OLDEST evicts the head, admits the newcomer,
+// and counts the loss as `shed`. Every path preserves `valid`.
+fn admit(q: Queue, env: Envelope, policy: Shed) -> (result: Admit) {
+    if full(q) {
+        return admit_full(q, env, policy);
+    } else {
+    }
+    let slot: u64 = select(q.count < 8, q.count, 0);
+    let next_count: u64 = q.count +% 1;
+    let grown: Queue = Queue {
+        ..q,
+        slots: replace(q.slots, slot, env),
+        count: next_count,
+        admitted: q.admitted +% 1,
+        high: select(next_count > q.high, next_count, q.high)
+    };
+    return Admit {
+        queue: grown,
+        accepted: true,
+        shed_head: false,
+        error: svc.errors.Error { class: svc.errors.Class.TRANSIENT, code: 0, attempts: 0 }
+    };
+}
+
+fn admit_full(q: Queue, env: Envelope, policy: Shed) -> (result: Admit) {
+    return match policy {
+        REJECT => Admit {
+            queue: Queue { ..q, refused: q.refused +% 1 },
+            accepted: false,
+            shed_head: false,
+            error: svc.errors.make(svc.errors.Class.OVERLOAD, 1)
+        },
+        DROP_NEWEST => Admit {
+            queue: Queue { ..q, shed: q.shed +% 1 },
+            accepted: false,
+            shed_head: false,
+            error: svc.errors.make(svc.errors.Class.OVERLOAD, 2)
+        },
+        DROP_OLDEST => admit_evict(q, env),
+    };
+}
+
+// DROP_OLDEST: shift the head out, admit at the tail. The evicted head
+// is returned via `shed_head = true` semantics in the error code (3);
+// its identity is intentionally not preserved — dropping is lossy by
+// policy, and the `shed` counter is the audit trail.
+fn admit_evict(q: Queue, env: Envelope) -> (result: Admit) {
+    let shifted: [Envelope; 8] = shift_slots(q.slots, q.count);
+    let slot: u64 = select(q.count > 0, q.count -% 1, 0);
+    let admitted_q: Queue = Queue {
+        ..q,
+        slots: replace(shifted, slot, env),
+        admitted: q.admitted +% 1,
+        shed: q.shed +% 1
+    };
+    return Admit {
+        queue: admitted_q,
+        accepted: true,
+        shed_head: true,
+        error: svc.errors.make(svc.errors.Class.OVERLOAD, 3)
+    };
+}
+
+record ShiftFold { slots: [Envelope; 8] }
+
+// Shift every live element one position toward the head. Strict-select
+// discipline: every projection index is clamped into 0..8 independently
+// of the liveness mask, so no select arm can trap.
+fn shift_slots(slots: [Envelope; 8], count: u64) -> (result: [Envelope; 8]) {
+    let blank: Envelope = Envelope { id: 0, op: 0, deadline: 0, arg0: 0, arg1: 0 };
+    let seed: ShiftFold = ShiftFold { slots: slots };
+    iterate i over slots carrying st: ShiftFold = seed {
+        let src: u64 = select(i +% 1 < 8, i +% 1, 0);
+        let carry: bool = i +% 1 < count;
+        let moved: Envelope = select(carry, st.slots[src], blank);
+        next st = ShiftFold { slots: replace(st.slots, i, moved) };
+    }
+    return st.slots;
+}
+
+// Dequeue the head in FIFO order. Empty reports `found = false` with a
+// blank head — values are never sentinel-bearing.
+fn dequeue(q: Queue) -> (result: Dequeue) {
+    let blank: Envelope = Envelope { id: 0, op: 0, deadline: 0, arg0: 0, arg1: 0 };
+    let has: bool = q.count > 0;
+    let head: Envelope = select(has, q.slots[0], blank);
+    let shrunk: Queue = Queue { ..q, slots: shift_slots(q.slots, q.count), count: q.count -% 1 };
+    return Dequeue { queue: select(has, shrunk, q), found: has, head: head };
+}
+
+// Drop every envelope whose deadline has passed at `now`, preserving
+// FIFO order of the survivors. Reports how many were reaped so the
+// orchestrator can emit one event per sweep instead of per item.
+// Bounded: one traversal over the fixed backing array.
+fn reap_expired(q: Queue, now: u64) -> (result: Reap) {
+    let seed: ReapFold = ReapFold {
+        slots: q.slots,
+        kept: 0,
+        dropped: 0
+    };
+    iterate i over q.slots carrying st: ReapFold = seed {
+        let live: bool = i < q.count;
+        let slot: u64 = select(i < 8, i, 0);
+        let cur: Envelope = st.slots[slot];
+        let fresh: bool = cur.deadline > now;
+        let keep: bool = live && fresh;
+        let drop: bool = live && !fresh;
+        let dest: u64 = select(st.kept < 8, st.kept, 0);
+        next st = ReapFold {
+            slots: select(keep, replace(st.slots, dest, cur), st.slots),
+            kept: select(keep, st.kept +% 1, st.kept),
+            dropped: select(drop, st.dropped +% 1, st.dropped)
+        };
+    }
+    let blank: Envelope = Envelope { id: 0, op: 0, deadline: 0, arg0: 0, arg1: 0 };
+    let cleaned: ReapFold = clear_tail(st, q.count, blank);
+    return Reap {
+        queue: Queue { ..q, slots: cleaned.slots, count: st.kept, shed: q.shed +% st.dropped },
+        dropped: st.dropped
+    };
+}
+
+record ReapFold { slots: [Envelope; 8], kept: u64, dropped: u64 }
+
+record Reap { queue: Queue, dropped: u64 }
+
+// Zero the tail beyond `kept` so stale envelopes can never be observed
+// after a reap. Single traversal, clamped indices.
+fn clear_tail(st: ReapFold, old_count: u64, blank: Envelope) -> (result: ReapFold) {
+    iterate i over st.slots carrying acc: ReapFold = st {
+        let stale: bool = i >= acc.kept && i < old_count;
+        let slot: u64 = select(i < 8, i, 0);
+        next acc = ReapFold {
+            slots: select(stale, replace(acc.slots, slot, blank), acc.slots),
+            kept: acc.kept,
+            dropped: acc.dropped
+        };
+    }
+    return acc;
+}
+
+// --- Executable test entries ---
+
+// FIFO flow through a capacity-2 queue: admit two, refuse the third
+// with OVERLOAD/1, dequeue in order, invariant holds throughout.
+// Packs to 105001.
+fn candidate_queue_flow() -> (result: i64) {
+    let q0: Queue = open(2);
+    let e1: Envelope = Envelope { id: 1, op: 7, deadline: 9000, arg0: 10, arg1: 20 };
+    let e2: Envelope = Envelope { id: 2, op: 7, deadline: 9000, arg0: 30, arg1: 40 };
+    let e3: Envelope = Envelope { id: 3, op: 7, deadline: 9000, arg0: 50, arg1: 60 };
+    let a1: Admit = admit(q0, e1, Shed.REJECT);
+    let a2: Admit = admit(a1.queue, e2, Shed.REJECT);
+    let pressured: bool = pressure(a2.queue) == 2 && full(a2.queue) && valid(a2.queue);
+    let a3: Admit = admit(a2.queue, e3, Shed.REJECT);
+    let refused: bool = !a3.accepted && !a3.shed_head && a3.error.code == 1 && a3.queue.refused == 1;
+    let d1: Dequeue = dequeue(a3.queue);
+    let d2: Dequeue = dequeue(d1.queue);
+    let d3: Dequeue = dequeue(d2.queue);
+    let ordered: bool = d1.found && d1.head.id == 1 && d2.found && d2.head.id == 2 && !d3.found;
+    let drained: bool = valid(d3.queue) && d3.queue.count == 0 && pressure(d3.queue) == 0;
+    let counted: bool = d3.queue.admitted == 2 && d3.queue.refused == 1;
+    let ok: bool = a1.accepted && a2.accepted && pressured && refused && ordered && drained && counted;
+    return select(ok, 105001, 0 - 1);
+}
+
+// Shed-policy matrix on a capacity-1 queue: DROP_NEWEST sheds the
+// newcomer, DROP_OLDEST evicts the head and admits. Packs to 105002.
+fn candidate_queue_shed() -> (result: i64) {
+    let e1: Envelope = Envelope { id: 1, op: 7, deadline: 9000, arg0: 0, arg1: 0 };
+    let e2: Envelope = Envelope { id: 2, op: 7, deadline: 9000, arg0: 0, arg1: 0 };
+    let q0: Queue = open(1);
+    let a1: Admit = admit(q0, e1, Shed.DROP_NEWEST);
+    let a2: Admit = admit(a1.queue, e2, Shed.DROP_NEWEST);
+    let newest: bool = !a2.accepted && !a2.shed_head && a2.error.code == 2 && a2.queue.shed == 1 && a2.queue.refused == 0;
+    let q1: Queue = open(1);
+    let b1: Admit = admit(q1, e1, Shed.DROP_OLDEST);
+    let b2: Admit = admit(b1.queue, e2, Shed.DROP_OLDEST);
+    let oldest: bool = b2.accepted && b2.shed_head && b2.error.code == 3 && b2.queue.shed == 1;
+    let d1: Dequeue = dequeue(b2.queue);
+    let evicted: bool = d1.found && d1.head.id == 2 && valid(d1.queue);
+    let ok: bool = a1.accepted && newest && b1.accepted && oldest && evicted;
+    return select(ok, 105002, 0 - 1);
+}
+
+// Deadline reaping at `now`: stale envelopes drop, survivors keep FIFO
+// order, the tail is blanked. Case now=5000 over deadlines 1000/9000.
+// Packs to 105003.
+fn candidate_queue_reap(now: u64) -> (result: i64) {
+    let q0: Queue = open(3);
+    let e1: Envelope = Envelope { id: 1, op: 7, deadline: 1000, arg0: 0, arg1: 0 };
+    let e2: Envelope = Envelope { id: 2, op: 7, deadline: 9000, arg0: 0, arg1: 0 };
+    let e3: Envelope = Envelope { id: 3, op: 7, deadline: 2000, arg0: 0, arg1: 0 };
+    let a1: Admit = admit(q0, e1, Shed.REJECT);
+    let a2: Admit = admit(a1.queue, e2, Shed.REJECT);
+    let a3: Admit = admit(a2.queue, e3, Shed.REJECT);
+    let r: Reap = reap_expired(a3.queue, now);
+    let d1: Dequeue = dequeue(r.queue);
+    let swept: bool = r.dropped == 2 && r.queue.count == 1 && d1.found && d1.head.id == 2 && valid(r.queue);
+    let ok: bool = a1.accepted && a2.accepted && a3.accepted && swept;
+    return select(ok, 105003, 0 - 1);
+}

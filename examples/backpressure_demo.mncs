@@ -1,0 +1,31 @@
+mncs 0.13;
+
+// Bounded queue under burst: five requests hit a capacity-2 queue with
+// REJECT policy. Backpressure is the point: 2 admit, 3 refuse with
+// OVERLOAD/1, counters tell the story. Packs admitted/refused/depth to
+// 200003.
+module examples.backpressure_demo;
+
+use svc.queue;
+use svc.errors;
+
+fn run() -> (result: i64) {
+    let q0: svc.queue.Queue = svc.queue.open(2);
+    let a1: svc.queue.Admit = svc.queue.admit(q0, burst(1), svc.queue.Shed.REJECT);
+    let a2: svc.queue.Admit = svc.queue.admit(a1.queue, burst(2), svc.queue.Shed.REJECT);
+    let a3: svc.queue.Admit = svc.queue.admit(a2.queue, burst(3), svc.queue.Shed.REJECT);
+    let a4: svc.queue.Admit = svc.queue.admit(a3.queue, burst(4), svc.queue.Shed.REJECT);
+    let a5: svc.queue.Admit = svc.queue.admit(a4.queue, burst(5), svc.queue.Shed.REJECT);
+    let held: bool = a1.accepted && a2.accepted;
+    let shed: bool = !a3.accepted && !a4.accepted && !a5.accepted && a5.queue.refused == 3;
+    let codes: bool = a3.error.code == 1 && a4.error.code == 1 && a5.error.code == 1;
+    let d1: svc.queue.Dequeue = svc.queue.dequeue(a5.queue);
+    let a6: svc.queue.Admit = svc.queue.admit(d1.queue, burst(6), svc.queue.Shed.REJECT);
+    let recovered: bool = d1.found && d1.head.id == 1 && a6.accepted && svc.queue.valid(a6.queue);
+    let ok: bool = held && shed && codes && recovered;
+    return select(ok, 200003, 0 - 1);
+}
+
+fn burst(id: u64) -> (result: svc.queue.Envelope) {
+    return svc.queue.Envelope { id: id, op: 1, deadline: 9000, arg0: 0, arg1: 0 };
+}

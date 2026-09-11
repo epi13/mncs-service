@@ -1,0 +1,65 @@
+mncs 0.13;
+
+// Observable service: lifecycle and admission events framed onto the
+// operator ledger through granted `clock_read` + `host_write`. Each
+// event is one wire frame: op = event kind, payload = big-endian
+// millisecond instant. Humans read the ledger through a host decoder;
+// programs read the same frames back through `svc.framing.decode`.
+// Returns total bytes emitted (two 13-byte frames = 26).
+module examples.observable_service;
+
+use svc.observe;
+use svc.framing;
+
+// Report a ready transition (kind 1) and one admission (kind 2)
+// stamped with the granted clock. Returns bytes written.
+fn report() -> (result: u64)
+    capability ticker
+    effect clock_read authorized_by ticker
+    capability ledger
+    effect host_write authorized_by ledger
+{
+    let now: u64 = clock_read();
+    let o0: svc.observe.Obs = svc.observe.open();
+    let e1: svc.observe.Emitted = svc.observe.record_event(o0, 1, now, 3);
+    let e2: svc.observe.Emitted = svc.observe.record_event(e1.obs, 2, now, 11);
+    let w1: u64 = emit_event(e1.event);
+    let w2: u64 = emit_event(e2.event);
+    return w1 +% w2;
+}
+
+fn emit_event(e: svc.observe.Event) -> (result: u64)
+    capability ledger
+    effect host_write authorized_by ledger
+{
+    let wide: [byte; 64] = widen8(u64_bytes(e.at));
+    let enc: svc.framing.Encoded = svc.framing.encode(e.kind, wide, 8);
+    let view: [byte; up_to 64] = svc.framing.narrow(enc.bytes, enc.length);
+    return host_write(view);
+}
+
+// Big-endian millisecond rendering: fixed divisors, no formatting,
+// no locale. Fractional instants do not exist in this domain.
+fn u64_bytes(v: u64) -> (result: [byte; 8]) {
+    let b0: byte = ((v / 72057594037927936) % 256) as byte;
+    let b1: byte = ((v / 281474976710656) % 256) as byte;
+    let b2: byte = ((v / 1099511627776) % 256) as byte;
+    let b3: byte = ((v / 4294967296) % 256) as byte;
+    let b4: byte = ((v / 16777216) % 256) as byte;
+    let b5: byte = ((v / 65536) % 256) as byte;
+    let b6: byte = ((v / 256) % 256) as byte;
+    let b7: byte = (v % 256) as byte;
+    return [b0, b1, b2, b3, b4, b5, b6, b7];
+}
+
+fn widen8(p: [byte; 8]) -> (result: [byte; 64]) {
+    let b: [byte; 64] = svc.framing.blank();
+    let b0: [byte; 64] = replace(b, 0, p[0]);
+    let b1: [byte; 64] = replace(b0, 1, p[1]);
+    let b2: [byte; 64] = replace(b1, 2, p[2]);
+    let b3: [byte; 64] = replace(b2, 3, p[3]);
+    let b4: [byte; 64] = replace(b3, 4, p[4]);
+    let b5: [byte; 64] = replace(b4, 5, p[5]);
+    let b6: [byte; 64] = replace(b5, 6, p[6]);
+    return replace(b6, 7, p[7]);
+}

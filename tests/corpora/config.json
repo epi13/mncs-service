@@ -1,0 +1,29 @@
+{
+ "schema_version": "0.1",
+ "name": "svc-config",
+ "cases": [
+  {
+   "id": "validate",
+   "request": {
+    "schema_version": "0.1",
+    "target": {
+     "module": "svc.config",
+     "function": "candidate_config"
+    },
+    "arguments": [],
+    "step_budget": 4096
+   },
+   "expected": [
+    {
+     "integer": {
+      "value": 1123456,
+      "type": {
+       "bits": 64,
+       "signed": true
+      }
+     }
+    }
+   ]
+  }
+ ]
+}

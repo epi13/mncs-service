@@ -1,0 +1,85 @@
+{
+ "schema_version": "0.1",
+ "name": "svc-queue",
+ "cases": [
+  {
+   "id": "flow",
+   "request": {
+    "schema_version": "0.1",
+    "target": {
+     "module": "svc.queue",
+     "function": "candidate_queue_flow"
+    },
+    "arguments": [],
+    "step_budget": 32768
+   },
+   "expected": [
+    {
+     "integer": {
+      "value": 105001,
+      "type": {
+       "bits": 64,
+       "signed": true
+      }
+     }
+    }
+   ]
+  },
+  {
+   "id": "shed",
+   "request": {
+    "schema_version": "0.1",
+    "target": {
+     "module": "svc.queue",
+     "function": "candidate_queue_shed"
+    },
+    "arguments": [],
+    "step_budget": 32768
+   },
+   "expected": [
+    {
+     "integer": {
+      "value": 105002,
+      "type": {
+       "bits": 64,
+       "signed": true
+      }
+     }
+    }
+   ]
+  },
+  {
+   "id": "reap",
+   "request": {
+    "schema_version": "0.1",
+    "target": {
+     "module": "svc.queue",
+     "function": "candidate_queue_reap"
+    },
+    "arguments": [
+     {
+      "integer": {
+       "value": 5000,
+       "type": {
+        "bits": 64,
+        "signed": false
+       }
+      }
+     }
+    ],
+    "step_budget": 32768
+   },
+   "expected": [
+    {
+     "integer": {
+      "value": 105003,
+      "type": {
+       "bits": 64,
+       "signed": true
+      }
+     }
+    }
+   ]
+  }
+ ]
+}

@@ -1,0 +1,260 @@
+mncs 0.13;
+
+// svc.framing — length-prefixed frame codec for the 64-byte transport.
+//
+// The only bytes a service can move today cross the host boundary in
+// chunks of at most 64 (`host_read` / `host_write`). This module defines
+// the wire discipline inside that envelope so every service speaks the
+// same framing without restating it:
+//
+//   byte 0: magic (165)
+//   byte 1: version (1)
+//   byte 2: op (operation id, service-defined)
+//   byte 3: len (payload length, 0..=56)
+//   bytes 4..4+len: payload
+//   byte 4+len: checksum (wrapping sum of op + len + payload bytes)
+//
+// Maximum frame: 61 bytes, leaving headroom inside the 64-byte chunk.
+// Payloads above 56 bytes are rejected at encode time with OVERSIZED —
+// multi-chunk reassembly is future work behind an explicit sequence
+// design (see pressure SVC-P-003), not silent truncation here.
+//
+// Decoding never traps on hostile input: every malformed shape maps to
+// a `FrameError` variant, and every projection index is clamped so the
+// strict-`select` evaluator cannot observe an out-of-bounds access on
+// any path. Malformed input is data, matching the service rule that
+// untrusted bytes must not become control flow.
+module svc.framing;
+
+enum FrameError {
+    NONE,
+    TRUNCATED,
+    BAD_MAGIC,
+    BAD_VERSION,
+    LENGTH_MISMATCH,
+    OVERSIZED,
+    BAD_CHECKSUM
+}
+
+// A decoded frame: fixed 64-byte scratch plus the live length. Only
+// `payload[0..payload_len)` is meaningful output; the tail is scratch.
+record Decoded {
+    accepted: bool,
+    op: u64,
+    payload: [byte; 64],
+    payload_len: u64,
+    error: FrameError
+}
+
+record Encoded { bytes: [byte; 64], length: u64, accepted: bool, error: FrameError }
+
+fn magic() -> (result: byte) {
+    return 165;
+}
+
+fn version() -> (result: byte) {
+    return 1;
+}
+
+fn max_payload() -> (result: u64) {
+    return 56;
+}
+
+// Wrapping checksum over `length` bytes of `data`: op + len + payload
+// folded through u64 and reduced mod 256, mirroring
+// `mncs.core.bytes.v1.checksum4` at view width.
+fn checksum(data: [byte; 64], length: u64) -> (result: byte) {
+    iterate i over data carrying acc: u64 = 0 {
+        let slot: u64 = select(i < 64, i, 0);
+        let live: bool = i < length;
+        let b: u64 = select(live, data[slot] as u64, 0);
+        next acc = acc +% b;
+    }
+    return (acc % 256) as byte;
+}
+
+// Encode one frame. Payloads longer than 56 bytes are refused
+// (OVERSIZED) rather than truncated: silent truncation would turn a
+// framing layer into a data-loss layer.
+fn encode(op: u64, payload: [byte; 64], payload_len: u64) -> (result: Encoded) {
+    if payload_len > max_payload() {
+        return Encoded { bytes: blank(), length: 0, accepted: false, error: FrameError.OVERSIZED };
+    } else {
+    }
+    let len: u64 = select(payload_len <= 64, payload_len, 64);
+    let seed: EncFold = EncFold { bytes: header(op, len), at: 4 };
+    iterate i over payload carrying st: EncFold = seed {
+        let slot: u64 = select(i < 64, i, 0);
+        let live: bool = i < len;
+        let dest: u64 = select(st.at < 64, st.at, 0);
+        next st = EncFold {
+            bytes: select(live, replace(st.bytes, dest, payload[slot]), st.bytes),
+            at: select(live, st.at +% 1, st.at)
+        };
+    }
+    let sum: byte = checksum(st.bytes, st.at);
+    let tail: u64 = select(st.at < 64, st.at, 0);
+    let framed: [byte; 64] = replace(st.bytes, tail, sum);
+    return Encoded { bytes: framed, length: st.at +% 1, accepted: true, error: FrameError.NONE };
+}
+
+record EncFold { bytes: [byte; 64], at: u64 }
+
+// Four-byte header: magic, version, op, len. Op is reduced mod 256 with
+// the same explicit discipline as the checksum bytes.
+fn header(op: u64, len: u64) -> (result: [byte; 64]) {
+    let b: [byte; 64] = blank();
+    let b0: [byte; 64] = replace(b, 0, magic());
+    let b1: [byte; 64] = replace(b0, 1, version());
+    let b2: [byte; 64] = replace(b1, 2, (op % 256) as byte);
+    return replace(b2, 3, (len % 256) as byte);
+}
+
+fn blank() -> (result: [byte; 64]) {
+    return [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+}
+
+// Decode one frame from `length` bytes of `raw`. Checks run in wire
+// order (length, magic, version, declared length, checksum) so the
+// first defect wins deterministically. The payload copies out only on
+// full acceptance; rejected decodes carry a blank payload.
+fn decode(raw: [byte; 64], length: u64) -> (result: Decoded) {
+    if length < 5 {
+        return rejected(FrameError.TRUNCATED);
+    } else {
+    }
+    if raw[0] != magic() {
+        return rejected(FrameError.BAD_MAGIC);
+    } else {
+    }
+    if raw[1] != version() {
+        return rejected(FrameError.BAD_VERSION);
+    } else {
+    }
+    let op: u64 = raw[2] as u64;
+    let declared: u64 = raw[3] as u64;
+    if declared > max_payload() {
+        return rejected(FrameError.OVERSIZED);
+    } else {
+    }
+    if length != declared +% 5 {
+        return rejected(FrameError.LENGTH_MISMATCH);
+    } else {
+    }
+    // The checksum covers header + payload: exactly raw[0..declared+4),
+    // the same run the encoder folded. No window rebuild is needed.
+    let body: u64 = select(declared +% 4 <= 64, declared +% 4, 0);
+    let expect: byte = checksum(raw, body);
+    let tail: u64 = select(declared +% 4 < 64, declared +% 4, 0);
+    if raw[tail] != expect {
+        return rejected(FrameError.BAD_CHECKSUM);
+    } else {
+    }
+    let seed: DecFold = DecFold { payload: blank(), at: 0 };
+    iterate i over raw carrying st: DecFold = seed {
+        let src: u64 = select(i >= 4, i, 4);
+        let safe_src: u64 = select(src < 64, src, 0);
+        let live: bool = i >= 4 && i < declared +% 4;
+        let dest: u64 = select(st.at < 64, st.at, 0);
+        next st = DecFold {
+            payload: select(live, replace(st.payload, dest, raw[safe_src]), st.payload),
+            at: select(live, st.at +% 1, st.at)
+        };
+    }
+    return Decoded { accepted: true, op: op, payload: st.payload, payload_len: declared, error: FrameError.NONE };
+}
+
+record DecFold { payload: [byte; 64], at: u64 }
+
+fn rejected(error: FrameError) -> (result: Decoded) {
+    return Decoded { accepted: false, op: 0, payload: blank(), payload_len: 0, error: error };
+}
+
+// --- Executable test entries ---
+
+// Widen a short view into zero-padded exact storage for the codec.
+fn widen(v: [byte; up_to 64]) -> (result: [byte; 64]) {
+    let seed: WideFold = WideFold { out: blank(), at: 0 };
+    iterate i over v carrying st: WideFold = seed {
+        let slot: u64 = select(i < 64, i, 0);
+        let dest: u64 = select(st.at < 64, st.at, 0);
+        next st = WideFold { out: replace(st.out, dest, v[slot]), at: st.at +% 1 };
+    }
+    return st.out;
+}
+
+record WideFold { out: [byte; 64], at: u64 }
+
+// Narrow exact storage to a live prefix view for transport. Over-long
+// lengths clamp to 64 rather than trap: the tail is scratch, and the
+// clamp keeps the view inside storage on every path.
+fn narrow(b: [byte; 64], length: u64) -> (result: [byte; up_to 64]) {
+    let len: u64 = select(length <= 64, length, 64);
+    return b[0..len];
+}
+
+// Encode/decode roundtrip of a 4-byte payload under op 9: acceptance,
+// op echo, length echo, byte-exact payload, and the 9-byte wire length.
+// Packs to 107001.
+fn candidate_frame_roundtrip(payload: [byte; 4]) -> (result: i64) {
+    let wide: [byte; 64] = widen4(payload);
+    let enc: Encoded = encode(9, wide, 4);
+    let dec: Decoded = decode(enc.bytes, enc.length);
+    let echoed: bool = dec.accepted && dec.op == 9 && dec.payload_len == 4 && enc.length == 9;
+    let b0: bool = dec.payload[0] == payload[0];
+    let b1: bool = dec.payload[1] == payload[1];
+    let b2: bool = dec.payload[2] == payload[2];
+    let b3: bool = dec.payload[3] == payload[3];
+    let ok: bool = enc.accepted && echoed && b0 && b1 && b2 && b3;
+    return select(ok, 107001, 0 - 1);
+}
+
+fn widen4(p: [byte; 4]) -> (result: [byte; 64]) {
+    let b0: [byte; 64] = blank();
+    let b1: [byte; 64] = replace(b0, 0, p[0]);
+    let b2: [byte; 64] = replace(b1, 1, p[1]);
+    let b3: [byte; 64] = replace(b2, 2, p[2]);
+    return replace(b3, 3, p[3]);
+}
+
+// Hostile-input battery: each defect maps to its FrameError rank
+// (TRUNCATED 1, BAD_MAGIC 2, BAD_VERSION 3, LENGTH_MISMATCH 4,
+// OVERSIZED 5, BAD_CHECKSUM 6). A valid control frame decodes clean.
+// Packs ranks to 123456.
+fn candidate_frame_rejects() -> (result: i64) {
+    let good: Encoded = encode(3, blank(), 0);
+    let control: Decoded = decode(good.bytes, good.length);
+    let t0: Decoded = decode(blank(), 3);
+    let bad_magic: [byte; 64] = replace(good.bytes, 0, 0);
+    let t1: Decoded = decode(bad_magic, good.length);
+    let bad_version: [byte; 64] = replace(good.bytes, 1, 2);
+    let t2: Decoded = decode(bad_version, good.length);
+    let t3: Decoded = decode(good.bytes, good.length +% 1);
+    let huge: Encoded = encode(3, blank(), 57);
+    let flip: [byte; 64] = replace(good.bytes, 4, 1);
+    let t5: Decoded = decode(flip, good.length);
+    let r0: u64 = rank(t0.error);
+    let r1: u64 = rank(t1.error);
+    let r2: u64 = rank(t2.error);
+    let r3: u64 = rank(t3.error);
+    let r5: u64 = rank(t5.error);
+    let packed: i64 = ((((ranked(r0) * 10 + ranked(r1)) * 10 + ranked(r2)) * 10 + ranked(r3)) * 10 + ranked(5)) * 10 + ranked(r5);
+    let ok: bool = control.accepted && !huge.accepted && rank(huge.error) == 5;
+    return select(ok, packed, 0 - 1);
+}
+
+fn rank(e: FrameError) -> (result: u64) {
+    return match e {
+        NONE => 0,
+        TRUNCATED => 1,
+        BAD_MAGIC => 2,
+        BAD_VERSION => 3,
+        LENGTH_MISMATCH => 4,
+        OVERSIZED => 5,
+        BAD_CHECKSUM => 6,
+    };
+}
+
+fn ranked(r: u64) -> (result: i64) {
+    return r as i64;
+}

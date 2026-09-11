@@ -1,0 +1,172 @@
+mncs 0.13;
+
+// svc.observe — machine-readable observability foundations.
+//
+// Observability is values, not strings. An `Obs` threads through the
+// service step alongside state: a saturating event sequence, six
+// monotonic counters, and derived health. `record_event` mints one
+// `Event` per call with the next sequence number; counters advance
+// through named tallies so every increment site reads as intent.
+//
+// Event kinds (u64, stable): 1 = lifecycle transition, 2 = admission,
+// 3 = completion, 4 = failure, 5 = shed/refusal, 6 = drain progress,
+// 7 = retry scheduled. Codes are component-scoped alongside the kind.
+//
+// Human rendering (text logs, dashboards) is a host-side projection of
+// these values — the same direction as configuration parsing. Programs
+// and agents consume the records directly.
+module svc.observe;
+
+use svc.lifecycle;
+
+enum Health { HEALTHY, DEGRADED, DOWN }
+
+// One structured event. `seq` is unique within the Obs stream; `at` is
+// the millisecond instant the edge observed; `code` is scoped by `kind`.
+record Event { kind: u64, seq: u64, at: u64, code: u64 }
+
+record Counters {
+    admitted: u64,
+    completed: u64,
+    failed: u64,
+    refused: u64,
+    shed: u64,
+    retried: u64
+}
+
+record Obs { seq: u64, counters: Counters }
+
+record Emitted { obs: Obs, event: Event }
+
+fn open() -> (result: Obs) {
+    return Obs {
+        seq: 0,
+        counters: Counters { admitted: 0, completed: 0, failed: 0, refused: 0, shed: 0, retried: 0 }
+    };
+}
+
+// Mint the next event and advance the stream. Counters are untouched:
+// the caller tallies the matching outcome explicitly so "observed" and
+// "counted" can never silently diverge.
+fn record_event(o: Obs, kind: u64, at: u64, code: u64) -> (result: Emitted) {
+    let next_seq: u64 = o.seq +% 1;
+    let ev: Event = Event { kind: kind, seq: next_seq, at: at, code: code };
+    return Emitted { obs: Obs { ..o, seq: next_seq }, event: ev };
+}
+
+fn tally_admitted(o: Obs) -> (result: Obs) {
+    return Obs { ..o, counters: Counters { ..o.counters, admitted: o.counters.admitted +% 1 } };
+}
+
+fn tally_completed(o: Obs) -> (result: Obs) {
+    return Obs { ..o, counters: Counters { ..o.counters, completed: o.counters.completed +% 1 } };
+}
+
+fn tally_failed(o: Obs) -> (result: Obs) {
+    return Obs { ..o, counters: Counters { ..o.counters, failed: o.counters.failed +% 1 } };
+}
+
+fn tally_refused(o: Obs) -> (result: Obs) {
+    return Obs { ..o, counters: Counters { ..o.counters, refused: o.counters.refused +% 1 } };
+}
+
+fn tally_shed(o: Obs) -> (result: Obs) {
+    return Obs { ..o, counters: Counters { ..o.counters, shed: o.counters.shed +% 1 } };
+}
+
+fn tally_retried(o: Obs) -> (result: Obs) {
+    return Obs { ..o, counters: Counters { ..o.counters, retried: o.counters.retried +% 1 } };
+}
+
+// Derive service health from lifecycle phase and queue pressure.
+// DOWN: terminal phases (STOPPED, FAILED) — the service is gone.
+// DEGRADED: still alive but not fully serving (DEGRADED phase,
+// DRAINING, STOPPING), or READY with a full queue (saturated).
+// HEALTHY: everything else that admits work and has headroom.
+fn health_of(life: svc.lifecycle.Svc, depth: u64, cap: u64) -> (result: Health) {
+    return match life.phase {
+        CONSTRUCTED => Health.DEGRADED,
+        CONFIGURED => Health.DEGRADED,
+        STARTING => Health.DEGRADED,
+        READY => select(depth >= cap, Health.DEGRADED, Health.HEALTHY),
+        DEGRADED => Health.DEGRADED,
+        DRAINING => Health.DEGRADED,
+        STOPPING => Health.DEGRADED,
+        STOPPED => Health.DOWN,
+        FAILED => Health.DOWN,
+    };
+}
+
+// Readiness as a boolean for dependency gates and load balancers:
+// HEALTHY only. Mirrors `svc.lifecycle.is_ready` at the health layer
+// so both layers answer identically for READY services.
+fn ready_for_traffic(h: Health) -> (result: bool) {
+    return match h {
+        HEALTHY => true,
+        DEGRADED => false,
+        DOWN => false,
+    };
+}
+
+// --- Executable test entries ---
+
+// Sequence minting, tallies, and the health matrix over lifecycle
+// phases and queue pressure. Health ranks HEALTHY 0, DEGRADED 1,
+// DOWN 2 pack with the final sequence to 111212.
+fn candidate_observe() -> (result: i64) {
+    let o0: Obs = open();
+    let e1: Emitted = record_event(o0, 2, 100, 7);
+    let e2: Emitted = record_event(e1.obs, 3, 110, 0);
+    let sequenced: bool = e1.event.seq == 1 && e2.event.seq == 2 && e2.event.kind == 3 && e2.event.at == 110;
+    let t0: Obs = tally_admitted(tally_admitted(e2.obs));
+    let t1: Obs = tally_completed(t0);
+    let t2: Obs = tally_failed(tally_refused(tally_shed(tally_retried(t1))));
+    let c: Counters = t2.counters;
+    let counted: bool = c.admitted == 2 && c.completed == 1 && c.failed == 1 && c.refused == 1 && c.shed == 1 && c.retried == 1;
+    let ready: svc.lifecycle.Svc = ready_life();
+    let h1: Health = health_of(ready, 2, 8);
+    let h2: Health = health_of(ready, 8, 8);
+    let h3: Health = health_of(degraded_life(), 0, 8);
+    let h4: Health = health_of(draining_life(), 0, 8);
+    let h5: Health = health_of(failed_life(), 0, 8);
+    let h6: Health = health_of(boot_life(), 0, 8);
+    let ranks: i64 = health_rank(h1) * 100000 + health_rank(h2) * 10000 + health_rank(h3) * 1000 + health_rank(h4) * 100 + health_rank(h5) * 10 + health_rank(h6);
+    let traffic: bool = ready_for_traffic(h1) && !ready_for_traffic(h2) && !ready_for_traffic(h5);
+    let ok: bool = sequenced && counted && traffic;
+    let seq_now: i64 = e2.obs.seq as i64;
+    return select(ok, ranks * 10 + seq_now, 0 - 1);
+}
+
+fn health_rank(h: Health) -> (result: i64) {
+    return match h {
+        HEALTHY => 0,
+        DEGRADED => 1,
+        DOWN => 2,
+    };
+}
+
+fn boot_life() -> (result: svc.lifecycle.Svc) {
+    return svc.lifecycle.boot();
+}
+
+fn ready_life() -> (result: svc.lifecycle.Svc) {
+    let t0: svc.lifecycle.Transition = svc.lifecycle.configure(svc.lifecycle.boot());
+    let t1: svc.lifecycle.Transition = svc.lifecycle.start(t0.state);
+    let t2: svc.lifecycle.Transition = svc.lifecycle.mark_ready(t1.state);
+    return t2.state;
+}
+
+fn degraded_life() -> (result: svc.lifecycle.Svc) {
+    let t: svc.lifecycle.Transition = svc.lifecycle.degrade(ready_life(), 3);
+    return t.state;
+}
+
+fn draining_life() -> (result: svc.lifecycle.Svc) {
+    let t: svc.lifecycle.Transition = svc.lifecycle.begin_drain(ready_life());
+    return t.state;
+}
+
+fn failed_life() -> (result: svc.lifecycle.Svc) {
+    let t: svc.lifecycle.Transition = svc.lifecycle.mark_failed(ready_life(), 3);
+    return t.state;
+}

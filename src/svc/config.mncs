@@ -1,0 +1,151 @@
+mncs 0.13;
+
+// svc.config — strongly typed service configuration.
+//
+// Configuration is a plain `Config` record: no maps, no JSON, no strings.
+// Every field has a static type and a validated range, defaults come from
+// `defaults()`, overrides arrive as a `Partial` (per-field `OptU64` with
+// an explicit `set` bit — absence is data, not a null), and `validate`
+// reports the first defect as a machine-readable code in deterministic
+// field order. Serialization formats stay adapters outside this module:
+//
+//   file/env/CLI text -> Partial -> resolve -> Config -> validate
+//
+// The parse adapters are host-side until the language gains bounded text
+// (see pressure SVC-P-011); what lives here — defaults, overlay, and
+// validation — is exactly the part that must be total and testable.
+module svc.config;
+
+// Validated startup configuration. Bounds mirror the framework's static
+// capacities: workers/queue_cap fit the 8-slot pool/queue, max_frame fits
+// the 61-byte wire frame, deadlines stay within one hour.
+record Config {
+    port: u64,
+    workers: u64,
+    queue_cap: u64,
+    deadline_ms: u64,
+    max_frame: u64,
+    max_attempts: u64
+}
+
+record OptU64 { set: bool, value: u64 }
+
+record Partial {
+    port: OptU64,
+    workers: OptU64,
+    queue_cap: OptU64,
+    deadline_ms: OptU64,
+    max_frame: OptU64,
+    max_attempts: OptU64
+}
+
+record Check { ok: bool, code: u64 }
+
+// Production defaults: loopback-style port, mid-size pool, full queue,
+// five-second deadline, full wire frame, three attempts.
+fn defaults() -> (result: Config) {
+    return Config {
+        port: 8080,
+        workers: 4,
+        queue_cap: 8,
+        deadline_ms: 5000,
+        max_frame: 61,
+        max_attempts: 3
+    };
+}
+
+fn unset() -> (result: Partial) {
+    let no: OptU64 = OptU64 { set: false, value: 0 };
+    return Partial {
+        port: no,
+        workers: no,
+        queue_cap: no,
+        deadline_ms: no,
+        max_frame: no,
+        max_attempts: no
+    };
+}
+
+fn set(value: u64) -> (result: OptU64) {
+    return OptU64 { set: true, value: value };
+}
+
+// Overlay: every `set` field wins, everything else keeps the default.
+// Total and order-independent — field independence is by construction.
+fn resolve(base: Config, lay: Partial) -> (result: Config) {
+    return Config {
+        port: select(lay.port.set, lay.port.value, base.port),
+        workers: select(lay.workers.set, lay.workers.value, base.workers),
+        queue_cap: select(lay.queue_cap.set, lay.queue_cap.value, base.queue_cap),
+        deadline_ms: select(lay.deadline_ms.set, lay.deadline_ms.value, base.deadline_ms),
+        max_frame: select(lay.max_frame.set, lay.max_frame.value, base.max_frame),
+        max_attempts: select(lay.max_attempts.set, lay.max_attempts.value, base.max_attempts)
+    };
+}
+
+// Validation codes: 0 = valid, 1 = bad port (0 or > 65535),
+// 2 = workers outside 1..=8, 3 = queue_cap outside 1..=8,
+// 4 = deadline_ms outside 1..=3600000, 5 = max_frame outside 5..=61,
+// 6 = max_attempts above 32 (the counted-iteration ceiling that retry
+// loops must respect). First defect in field order wins.
+fn validate(c: Config) -> (result: Check) {
+    if c.port == 0 || c.port > 65535 {
+        return Check { ok: false, code: 1 };
+    } else {
+    }
+    if c.workers == 0 || c.workers > 8 {
+        return Check { ok: false, code: 2 };
+    } else {
+    }
+    if c.queue_cap == 0 || c.queue_cap > 8 {
+        return Check { ok: false, code: 3 };
+    } else {
+    }
+    if c.deadline_ms == 0 || c.deadline_ms > 3600000 {
+        return Check { ok: false, code: 4 };
+    } else {
+    }
+    if c.max_frame < 5 || c.max_frame > 61 {
+        return Check { ok: false, code: 5 };
+    } else {
+    }
+    if c.max_attempts > 32 {
+        return Check { ok: false, code: 6 };
+    } else {
+    }
+    return Check { ok: true, code: 0 };
+}
+
+// --- Executable test entries ---
+
+// Defaults validate; one overlay resolves; each field's defect reports
+// its code in order. Packs flag(1) then codes 1..6 to 1123456.
+fn candidate_config() -> (result: i64) {
+    let d: Config = defaults();
+    let v0: Check = validate(d);
+    let lay: Partial = Partial {
+        port: set(9000),
+        workers: OptU64 { set: false, value: 0 },
+        queue_cap: OptU64 { set: false, value: 0 },
+        deadline_ms: OptU64 { set: false, value: 0 },
+        max_frame: OptU64 { set: false, value: 0 },
+        max_attempts: set(1)
+    };
+    let r: Config = resolve(d, lay);
+    let overlay: bool = r.port == 9000 && r.workers == 4 && r.max_attempts == 1;
+    let v1: Check = validate(Config { ..d, port: 0 });
+    let v2: Check = validate(Config { ..d, workers: 9 });
+    let v3: Check = validate(Config { ..d, queue_cap: 0 });
+    let v4: Check = validate(Config { ..d, deadline_ms: 3600001 });
+    let v5: Check = validate(Config { ..d, max_frame: 4 });
+    let v6: Check = validate(Config { ..d, max_attempts: 33 });
+    let codes: bool = v1.code == 1 && v2.code == 2 && v3.code == 3 && v4.code == 4 && v5.code == 5 && v6.code == 6;
+    let rejections: bool = !v1.ok && !v2.ok && !v3.ok && !v4.ok && !v5.ok && !v6.ok;
+    let packed: i64 = flag(v0.ok) * 1000000 + (v1.code as i64) * 100000 + (v2.code as i64) * 10000 + (v3.code as i64) * 1000 + (v4.code as i64) * 100 + (v5.code as i64) * 10 + (v6.code as i64);
+    let ok: bool = v0.ok && overlay && codes && rejections;
+    return select(ok, packed, 0 - 1);
+}
+
+fn flag(b: bool) -> (result: i64) {
+    return select(b, 1, 0);
+}

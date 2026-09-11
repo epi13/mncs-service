@@ -1,0 +1,29 @@
+{
+ "schema_version": "0.1",
+ "name": "ex_graceful_shutdown",
+ "cases": [
+  {
+   "id": "run",
+   "request": {
+    "schema_version": "0.1",
+    "target": {
+     "module": "examples.graceful_shutdown",
+     "function": "run"
+    },
+    "arguments": [],
+    "step_budget": 65536
+   },
+   "expected": [
+    {
+     "integer": {
+      "value": 200004,
+      "type": {
+       "bits": 64,
+       "signed": true
+      }
+     }
+    }
+   ]
+  }
+ ]
+}

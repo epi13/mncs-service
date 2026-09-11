@@ -1,0 +1,37 @@
+mncs 0.13;
+
+// Retry client walk: three attempts against a transient fault inside a
+// 5000 ms deadline starting at 1000. The walk threads virtual instants
+// (attempt at 1000 fails transient, backoff 10, attempt at 1010 fails
+// transient, backoff 20, attempt at 1030 succeeds) and packs the
+// attempt count, total waited, and terminal class to 200005.
+//
+// The loop is straight-line here because the language has no general
+// iteration over attempts (see pressure SVC-P-005): each attempt is an
+// explicit step, which is also why every attempt stays inspectable.
+module examples.retry_client;
+
+use svc.errors;
+use svc.retry;
+
+fn run() -> (result: i64) {
+    let p: svc.retry.Policy = svc.retry.policy(3, 10, 1000);
+    let deadline: u64 = 5000;
+    let t0: u64 = 1000;
+    let e0: svc.errors.Error = svc.errors.make(svc.errors.Class.TRANSIENT, 41);
+    let go1: bool = svc.retry.should_retry(p, e0, 0, t0, deadline);
+    let w0: u64 = svc.retry.delay_for(p, 0);
+    let e1: svc.errors.Error = svc.errors.with_attempt(e0);
+    let t1: u64 = t0 +% w0;
+    let go2: bool = svc.retry.should_retry(p, e1, 1, t1, deadline);
+    let w1: u64 = svc.retry.delay_for(p, 1);
+    let e2: svc.errors.Error = svc.errors.with_attempt(e1);
+    let t2: u64 = t1 +% w1;
+    let go3: bool = svc.retry.should_retry(p, e2, 2, t2, deadline);
+    let waited: u64 = w0 +% w1;
+    let spent: bool = go1 && go2 && go3 && e2.attempts == 2 && waited == 30;
+    let done: svc.errors.Error = svc.errors.with_attempt(e2);
+    let terminal_ok: bool = svc.errors.exhausted(done, 3);
+    let ok: bool = spent && terminal_ok;
+    return select(ok, 200005, 0 - 1);
+}

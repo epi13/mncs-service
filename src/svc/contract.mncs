@@ -1,0 +1,96 @@
+mncs 0.13;
+
+// svc.contract — machine-inspectable service contracts.
+//
+// A `Contract` declares what a service offers in a form a machine can
+// read without parsing prose: up to four operations, each with an id,
+// scalar input width, idempotency, purity, and a per-operation time
+// budget. Agents, routers, and the admission path consume this record
+// directly (`svc.service.admit_request` consults it on every request).
+//
+// The four-operation bound is the current static capacity, stated
+// openly (see pressure SVC-P-010 for variable-length operation tables).
+// Side-effect metadata stays coarse (`pure` bit) until the language can
+// express effect sets as values (see pressure SVC-P-017).
+module svc.contract;
+
+// One declared operation. `input_words` counts scalar arguments (the
+// envelope's arg0/arg1 plus op); `max_ms` is the per-attempt budget the
+// orchestrator enforces. `idempotent` decides retry safety; `pure`
+// marks operations with no observable effects (safe to replay, cache,
+// or shed under load without loss).
+record Op { id: u64, input_words: u64, idempotent: bool, pure: bool, max_ms: u64 }
+
+record Contract { ops: [Op; 4], count: u64, service: u64 }
+
+record Found { found: bool, op: Op }
+
+// Build a contract of up to 4 operations. Excess operations cannot be
+// expressed — the constructor takes exactly the declared set, so the
+// bound is visible at every construction site.
+fn contract1(service: u64, a: Op) -> (result: Contract) {
+    let blank: Op = Op { id: 0, input_words: 0, idempotent: false, pure: false, max_ms: 0 };
+    return Contract { ops: [a, blank, blank, blank], count: 1, service: service };
+}
+
+fn contract2(service: u64, a: Op, b: Op) -> (result: Contract) {
+    let blank: Op = Op { id: 0, input_words: 0, idempotent: false, pure: false, max_ms: 0 };
+    return Contract { ops: [a, b, blank, blank], count: 2, service: service };
+}
+
+fn contract3(service: u64, a: Op, b: Op, c: Op) -> (result: Contract) {
+    let blank: Op = Op { id: 0, input_words: 0, idempotent: false, pure: false, max_ms: 0 };
+    return Contract { ops: [a, b, blank, blank], count: 3, service: service };
+}
+
+// Look up an operation by id over the declared prefix. Undeclared ids
+// report `found = false` with a blank op — never a trap. Single scan:
+// each declared slot compares against `id`, keeping the first match.
+// Indices clamp; liveness masks; strict-select safe.
+fn find(c: Contract, id: u64) -> (result: Found) {
+    let blank: Op = Op { id: 0, input_words: 0, idempotent: false, pure: false, max_ms: 0 };
+    let seed: ScanFold = ScanFold { op: blank, found: false };
+    iterate i over c.ops carrying st: ScanFold = seed {
+        let slot: u64 = select(i < 4, i, 0);
+        let live: bool = i < c.count;
+        let probe: Op = c.ops[slot];
+        let hit: bool = live && !st.found && probe.id == id;
+        next st = ScanFold { op: select(hit, probe, st.op), found: st.found || hit };
+    }
+    return Found { found: st.found, op: st.op };
+}
+
+record ScanFold { op: Op, found: bool }
+
+// Retry safety of one operation: idempotent operations may be retried
+// after transient faults; non-idempotent ones must not (at-most-once).
+// Purity implies idempotency for retry purposes, but the bits stay
+// independent so contracts can state "pure but rate-limited" later.
+fn retry_safe(op: Op) -> (result: bool) {
+    return op.idempotent;
+}
+
+// Admission width check: the request's word count must not exceed the
+// declared input width. Over-wide requests are PROTOCOL errors, never
+// silent truncations.
+fn width_ok(op: Op, words: u64) -> (result: bool) {
+    return words <= op.input_words;
+}
+
+// --- Executable test entries ---
+
+// Contract lookup, width checks, and retry-safety bits over a
+// two-operation contract. Packs to 113001.
+fn candidate_contract() -> (result: i64) {
+    let read: Op = Op { id: 1, input_words: 3, idempotent: true, pure: true, max_ms: 500 };
+    let write: Op = Op { id: 2, input_words: 3, idempotent: false, pure: false, max_ms: 2000 };
+    let c: Contract = contract2(77, read, write);
+    let f1: Found = find(c, 1);
+    let f2: Found = find(c, 2);
+    let f9: Found = find(c, 9);
+    let lookup: bool = f1.found && f1.op.max_ms == 500 && f2.found && !f2.op.idempotent && !f9.found;
+    let widths: bool = width_ok(f1.op, 3) && width_ok(f1.op, 0) && !width_ok(f1.op, 4);
+    let safety: bool = retry_safe(f1.op) && !retry_safe(f2.op);
+    let ok: bool = lookup && widths && safety && c.service == 77 && c.count == 2;
+    return select(ok, 113001, 0 - 1);
+}

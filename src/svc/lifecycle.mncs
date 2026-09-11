@@ -1,0 +1,339 @@
+mncs 0.13;
+
+// svc.lifecycle — explicit service lifecycle as total bounded functions.
+//
+// A service moves through exactly eight phases:
+//
+//   CONSTRUCTED -> CONFIGURED -> STARTING -> READY <-> DEGRADED
+//                                                    \/
+//                                                  DRAINING -> STOPPING -> STOPPED
+//   any non-terminal ------------------------------> FAILED (terminal per epoch)
+//
+// Every transition reports acceptance explicitly (`Transition.accepted`).
+// An invalid transition leaves the state unchanged and reports rejected —
+// never a trap, never silent promotion. This mirrors the `mncs.std.task.v1`
+// discipline one level up: tasks own steps, services own epochs.
+//
+// FAILED and STOPPED are terminal *for the epoch*: `restart` moves either
+// back to CONSTRUCTED with `epoch +% 1`, so restarts are observable values,
+// not hidden resets. `failures` counts lifetime failures across epochs;
+// `note` carries the most recent reason code (a machine-readable u64, never
+// prose).
+//
+// Admission policy (`admits`) is part of the lifecycle: only READY and
+// DEGRADED accept new work. Draining and shutdown sequencing (counts,
+// deadlines) live in `svc.shutdown`, which consumes these transitions.
+module svc.lifecycle;
+
+enum Phase {
+    CONSTRUCTED,
+    CONFIGURED,
+    STARTING,
+    READY,
+    DEGRADED,
+    DRAINING,
+    STOPPING,
+    STOPPED,
+    FAILED
+}
+
+record Svc { phase: Phase, epoch: u64, note: u64, failures: u64 }
+
+record Transition { state: Svc, accepted: bool }
+
+// Construct a fresh epoch-0 service. The only way to obtain a Svc value
+// in CONSTRUCTED is here or via `restart`, so epoch discipline holds by
+// construction for every caller that threads the value.
+fn boot() -> (result: Svc) {
+    return Svc { phase: Phase.CONSTRUCTED, epoch: 0, note: 0, failures: 0 };
+}
+
+// CONSTRUCTED -> CONFIGURED. Re-running on an already CONFIGURED service
+// is rejected (idempotent re-configuration must be an explicit design
+// decision, not an accident).
+fn configure(s: Svc) -> (result: Transition) {
+    return match s.phase {
+        CONSTRUCTED => Transition { state: Svc { ..s, phase: Phase.CONFIGURED }, accepted: true },
+        CONFIGURED => Transition { state: s, accepted: false },
+        STARTING => Transition { state: s, accepted: false },
+        READY => Transition { state: s, accepted: false },
+        DEGRADED => Transition { state: s, accepted: false },
+        DRAINING => Transition { state: s, accepted: false },
+        STOPPING => Transition { state: s, accepted: false },
+        STOPPED => Transition { state: s, accepted: false },
+        FAILED => Transition { state: s, accepted: false },
+    };
+}
+
+// CONFIGURED -> STARTING.
+fn start(s: Svc) -> (result: Transition) {
+    return match s.phase {
+        CONSTRUCTED => Transition { state: s, accepted: false },
+        CONFIGURED => Transition { state: Svc { ..s, phase: Phase.STARTING }, accepted: true },
+        STARTING => Transition { state: s, accepted: false },
+        READY => Transition { state: s, accepted: false },
+        DEGRADED => Transition { state: s, accepted: false },
+        DRAINING => Transition { state: s, accepted: false },
+        STOPPING => Transition { state: s, accepted: false },
+        STOPPED => Transition { state: s, accepted: false },
+        FAILED => Transition { state: s, accepted: false },
+    };
+}
+
+// STARTING -> READY. Readiness is an explicit event, never inferred from
+// "the start function returned".
+fn mark_ready(s: Svc) -> (result: Transition) {
+    return match s.phase {
+        CONSTRUCTED => Transition { state: s, accepted: false },
+        CONFIGURED => Transition { state: s, accepted: false },
+        STARTING => Transition { state: Svc { ..s, phase: Phase.READY }, accepted: true },
+        READY => Transition { state: s, accepted: false },
+        DEGRADED => Transition { state: s, accepted: false },
+        DRAINING => Transition { state: s, accepted: false },
+        STOPPING => Transition { state: s, accepted: false },
+        STOPPED => Transition { state: s, accepted: false },
+        FAILED => Transition { state: s, accepted: false },
+    };
+}
+
+// READY -> DEGRADED with a machine-readable reason in `note`. A degraded
+// service still serves (see `admits`) but reports not-ready.
+fn degrade(s: Svc, reason: u64) -> (result: Transition) {
+    return match s.phase {
+        CONSTRUCTED => Transition { state: s, accepted: false },
+        CONFIGURED => Transition { state: s, accepted: false },
+        STARTING => Transition { state: s, accepted: false },
+        READY => Transition { state: Svc { ..s, phase: Phase.DEGRADED, note: reason }, accepted: true },
+        DEGRADED => Transition { state: Svc { ..s, note: reason }, accepted: true },
+        DRAINING => Transition { state: s, accepted: false },
+        STOPPING => Transition { state: s, accepted: false },
+        STOPPED => Transition { state: s, accepted: false },
+        FAILED => Transition { state: s, accepted: false },
+    };
+}
+
+// DEGRADED -> READY. Recovery clears the degradation note.
+fn recover(s: Svc) -> (result: Transition) {
+    return match s.phase {
+        CONSTRUCTED => Transition { state: s, accepted: false },
+        CONFIGURED => Transition { state: s, accepted: false },
+        STARTING => Transition { state: s, accepted: false },
+        READY => Transition { state: s, accepted: false },
+        DEGRADED => Transition { state: Svc { ..s, phase: Phase.READY, note: 0 }, accepted: true },
+        DRAINING => Transition { state: s, accepted: false },
+        STOPPING => Transition { state: s, accepted: false },
+        STOPPED => Transition { state: s, accepted: false },
+        FAILED => Transition { state: s, accepted: false },
+    };
+}
+
+// READY|DEGRADED -> DRAINING. The service stops admitting new work
+// (see `admits`) and the shutdown orchestrator drains what is active.
+fn begin_drain(s: Svc) -> (result: Transition) {
+    return match s.phase {
+        CONSTRUCTED => Transition { state: s, accepted: false },
+        CONFIGURED => Transition { state: s, accepted: false },
+        STARTING => Transition { state: s, accepted: false },
+        READY => Transition { state: Svc { ..s, phase: Phase.DRAINING }, accepted: true },
+        DEGRADED => Transition { state: Svc { ..s, phase: Phase.DRAINING }, accepted: true },
+        DRAINING => Transition { state: s, accepted: false },
+        STOPPING => Transition { state: s, accepted: false },
+        STOPPED => Transition { state: s, accepted: false },
+        FAILED => Transition { state: s, accepted: false },
+    };
+}
+
+// DRAINING -> STOPPING. The orchestrator calls this once active work has
+// drained (or the drain deadline fired); the lifecycle itself does not
+// count work, so this transition is intentionally unconditional here.
+fn stop(s: Svc) -> (result: Transition) {
+    return match s.phase {
+        CONSTRUCTED => Transition { state: s, accepted: false },
+        CONFIGURED => Transition { state: s, accepted: false },
+        STARTING => Transition { state: s, accepted: false },
+        READY => Transition { state: s, accepted: false },
+        DEGRADED => Transition { state: s, accepted: false },
+        DRAINING => Transition { state: Svc { ..s, phase: Phase.STOPPING }, accepted: true },
+        STOPPING => Transition { state: s, accepted: false },
+        STOPPED => Transition { state: s, accepted: false },
+        FAILED => Transition { state: s, accepted: false },
+    };
+}
+
+// Abort path: STARTING|READY|DEGRADED|DRAINING -> STOPPING, skipping the
+// drain. Recorded as a distinct transition so fast shutdown is visible
+// in traces rather than disguised as a drain.
+fn halt(s: Svc, reason: u64) -> (result: Transition) {
+    return match s.phase {
+        CONSTRUCTED => Transition { state: s, accepted: false },
+        CONFIGURED => Transition { state: s, accepted: false },
+        STARTING => Transition { state: Svc { ..s, phase: Phase.STOPPING, note: reason }, accepted: true },
+        READY => Transition { state: Svc { ..s, phase: Phase.STOPPING, note: reason }, accepted: true },
+        DEGRADED => Transition { state: Svc { ..s, phase: Phase.STOPPING, note: reason }, accepted: true },
+        DRAINING => Transition { state: Svc { ..s, phase: Phase.STOPPING, note: reason }, accepted: true },
+        STOPPING => Transition { state: s, accepted: false },
+        STOPPED => Transition { state: s, accepted: false },
+        FAILED => Transition { state: s, accepted: false },
+    };
+}
+
+// STOPPING -> STOPPED. Releasing resources happens around this edge;
+// the state value itself is the receipt.
+fn finish(s: Svc) -> (result: Transition) {
+    return match s.phase {
+        CONSTRUCTED => Transition { state: s, accepted: false },
+        CONFIGURED => Transition { state: s, accepted: false },
+        STARTING => Transition { state: s, accepted: false },
+        READY => Transition { state: s, accepted: false },
+        DEGRADED => Transition { state: s, accepted: false },
+        DRAINING => Transition { state: s, accepted: false },
+        STOPPING => Transition { state: Svc { ..s, phase: Phase.STOPPED }, accepted: true },
+        STOPPED => Transition { state: s, accepted: false },
+        FAILED => Transition { state: s, accepted: false },
+    };
+}
+
+// Any non-terminal phase -> FAILED. Counts the failure and stores the
+// reason. Terminal states reject: failure of a stopped service is a
+// host-level event, not a lifecycle transition.
+//
+// (Named `mark_failed`: bare `fail` is the language's failure-terminator
+// keyword and cannot be a function name.)
+fn mark_failed(s: Svc, reason: u64) -> (result: Transition) {
+    return match s.phase {
+        CONSTRUCTED => Transition { state: Svc { ..s, phase: Phase.FAILED, note: reason, failures: s.failures +% 1 }, accepted: true },
+        CONFIGURED => Transition { state: Svc { ..s, phase: Phase.FAILED, note: reason, failures: s.failures +% 1 }, accepted: true },
+        STARTING => Transition { state: Svc { ..s, phase: Phase.FAILED, note: reason, failures: s.failures +% 1 }, accepted: true },
+        READY => Transition { state: Svc { ..s, phase: Phase.FAILED, note: reason, failures: s.failures +% 1 }, accepted: true },
+        DEGRADED => Transition { state: Svc { ..s, phase: Phase.FAILED, note: reason, failures: s.failures +% 1 }, accepted: true },
+        DRAINING => Transition { state: Svc { ..s, phase: Phase.FAILED, note: reason, failures: s.failures +% 1 }, accepted: true },
+        STOPPING => Transition { state: Svc { ..s, phase: Phase.FAILED, note: reason, failures: s.failures +% 1 }, accepted: true },
+        STOPPED => Transition { state: s, accepted: false },
+        FAILED => Transition { state: s, accepted: false },
+    };
+}
+
+// STOPPED|FAILED -> CONSTRUCTED with a bumped epoch. Failures survive;
+// the note clears. This is the only transition that changes `epoch`.
+fn restart(s: Svc) -> (result: Transition) {
+    return match s.phase {
+        CONSTRUCTED => Transition { state: s, accepted: false },
+        CONFIGURED => Transition { state: s, accepted: false },
+        STARTING => Transition { state: s, accepted: false },
+        READY => Transition { state: s, accepted: false },
+        DEGRADED => Transition { state: s, accepted: false },
+        DRAINING => Transition { state: s, accepted: false },
+        STOPPING => Transition { state: s, accepted: false },
+        STOPPED => Transition { state: Svc { phase: Phase.CONSTRUCTED, epoch: s.epoch +% 1, note: 0, failures: s.failures }, accepted: true },
+        FAILED => Transition { state: Svc { phase: Phase.CONSTRUCTED, epoch: s.epoch +% 1, note: 0, failures: s.failures }, accepted: true },
+    };
+}
+
+// Admission predicate: only serving phases accept new work.
+fn admits(s: Svc) -> (result: bool) {
+    return match s.phase {
+        CONSTRUCTED => false,
+        CONFIGURED => false,
+        STARTING => false,
+        READY => true,
+        DEGRADED => true,
+        DRAINING => false,
+        STOPPING => false,
+        STOPPED => false,
+        FAILED => false,
+    };
+}
+
+// Readiness predicate: READY only. DEGRADED serves but is not ready;
+// load balancers and dependency gates must use this, not `admits`.
+fn is_ready(s: Svc) -> (result: bool) {
+    return match s.phase {
+        CONSTRUCTED => false,
+        CONFIGURED => false,
+        STARTING => false,
+        READY => true,
+        DEGRADED => false,
+        DRAINING => false,
+        STOPPING => false,
+        STOPPED => false,
+        FAILED => false,
+    };
+}
+
+// Terminal predicate: STOPPED or FAILED for the current epoch.
+fn is_terminal(s: Svc) -> (result: bool) {
+    return match s.phase {
+        CONSTRUCTED => false,
+        CONFIGURED => false,
+        STARTING => false,
+        READY => false,
+        DEGRADED => false,
+        DRAINING => false,
+        STOPPING => false,
+        STOPPED => true,
+        FAILED => true,
+    };
+}
+
+// --- Executable test entries (scalar packs for backend corpora) ---
+
+// Healthy path with a degrade/recover excursion and a clean drain:
+// boot -> configure -> start -> mark_ready -> degrade(7) -> recover ->
+// begin_drain -> stop -> finish, then restart bumps the epoch. Packs to
+// 101001.
+fn candidate_lifecycle_flow() -> (result: i64) {
+    let t0: Transition = configure(boot());
+    let t1: Transition = start(t0.state);
+    let t2: Transition = mark_ready(t1.state);
+    let ready_now: bool = is_ready(t2.state) && admits(t2.state);
+    let t3: Transition = degrade(t2.state, 7);
+    let degraded: bool = !is_ready(t3.state) && admits(t3.state) && t3.state.note == 7;
+    let t4: Transition = recover(t3.state);
+    let t5: Transition = begin_drain(t4.state);
+    let draining: bool = !admits(t5.state) && !is_terminal(t5.state);
+    let t6: Transition = stop(t5.state);
+    let t7: Transition = finish(t6.state);
+    let stopped: bool = is_terminal(t7.state) && !admits(t7.state);
+    let t8: Transition = restart(t7.state);
+    let reborn: bool = t8.state.epoch == 1 && t8.state.failures == 0;
+    let ok: bool = t0.accepted && t1.accepted && t2.accepted && ready_now && t3.accepted && degraded && t4.accepted && t5.accepted && draining && t6.accepted && t7.accepted && stopped && t8.accepted && reborn;
+    return select(ok, 101001, 0 - 1);
+}
+
+// Failure path: mark_failed from READY counts and stores the reason;
+// terminal states reject further failure; restart preserves the count.
+// Packs to 101002.
+fn candidate_lifecycle_fail_restart() -> (result: i64) {
+    let t0: Transition = configure(boot());
+    let t1: Transition = start(t0.state);
+    let t2: Transition = mark_ready(t1.state);
+    let f0: Transition = mark_failed(t2.state, 5);
+    let failed: bool = f0.accepted && is_terminal(f0.state) && f0.state.failures == 1 && f0.state.note == 5;
+    let f1: Transition = mark_failed(f0.state, 6);
+    let terminal_reject: bool = !f1.accepted && f1.state.note == 5;
+    let t3: Transition = restart(f0.state);
+    let reborn: bool = t3.accepted && t3.state.epoch == 1 && t3.state.failures == 1 && t3.state.note == 0;
+    let ok: bool = t0.accepted && t1.accepted && t2.accepted && failed && terminal_reject && reborn;
+    return select(ok, 101002, 0 - 1);
+}
+
+// Rejection battery: every invalid edge leaves state unchanged and
+// reports rejected. Packs to 101003.
+fn candidate_lifecycle_reject() -> (result: i64) {
+    let s0: Svc = boot();
+    let t1: Transition = configure(s0);
+    let r1: Transition = configure(t1.state);
+    let r2: Transition = start(s0);
+    let r3: Transition = mark_ready(t1.state);
+    let t2: Transition = start(t1.state);
+    let r4: Transition = recover(t2.state);
+    let r5: Transition = begin_drain(t2.state);
+    let t3: Transition = mark_ready(t2.state);
+    let r6: Transition = stop(t3.state);
+    let r7: Transition = finish(t3.state);
+    let r8: Transition = halt(s0, 1);
+    let r9: Transition = restart(t3.state);
+    let r10: Transition = degrade(t2.state, 1);
+    let ok: bool = t1.accepted && !r1.accepted && !r2.accepted && !r3.accepted && t2.accepted && !r4.accepted && !r5.accepted && t3.accepted && !r6.accepted && !r7.accepted && !r8.accepted && !r9.accepted && !r10.accepted;
+    return select(ok, 101003, 0 - 1);
+}

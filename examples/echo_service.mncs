@@ -1,0 +1,79 @@
+mncs 0.13;
+
+// Framed echo service: the transport vertical slice.
+//
+// One `serve` step reads up to 64 inbound bytes through the granted
+// `host_read` boundary, decodes a wire frame (`svc.framing`), echoes
+// the payload back under the same op through the granted `host_write`
+// ledger, and returns the bytes emitted. Malformed input never traps:
+// the step answers with a rejection frame (op 0, one payload byte
+// carrying the FrameError rank) so the peer always gets a well-formed
+// frame. An empty read emits nothing and returns 0.
+//
+// Authority is declared, never ambient: the request reader, the
+// response ledger, and (for the stamped variant) the clock each name
+// their capability, and the executor realizes them only from explicit
+// operator grants. Without a grant the step fails closed.
+//
+// This is the honest current shape of "networking": the host boundary
+// stands in for a socket, and every byte still passes through the real
+// codec (see pressure SVC-P-002 for the missing socket effects).
+module examples.echo_service;
+
+use svc.framing;
+
+// One serve step. Returns bytes emitted to the ledger:
+// 0 on empty read, frame length on echo, 6 on a rejection frame.
+fn serve() -> (result: u64)
+    capability req_reader
+    effect host_read authorized_by req_reader
+    capability resp_writer
+    effect host_write authorized_by resp_writer
+{
+    let inbound: [byte; up_to 64] = host_read();
+    let n: u64 = inbound.len;
+    if n == 0 {
+        return 0;
+    } else {
+    }
+    let raw: [byte; 64] = svc.framing.widen(inbound);
+    let dec: svc.framing.Decoded = svc.framing.decode(raw, n);
+    if dec.accepted {
+        return answer(dec.op, dec.payload, dec.payload_len);
+    } else {
+    }
+    return reject(rank_of(dec.error));
+}
+
+fn rank_of(e: svc.framing.FrameError) -> (result: u64) {
+    return match e {
+        NONE => 0,
+        TRUNCATED => 1,
+        BAD_MAGIC => 2,
+        BAD_VERSION => 3,
+        LENGTH_MISMATCH => 4,
+        OVERSIZED => 5,
+        BAD_CHECKSUM => 6,
+    };
+}
+
+// Echo path shared by every accepted frame.
+fn answer(op: u64, payload: [byte; 64], payload_len: u64) -> (result: u64)
+    capability resp_writer
+    effect host_write authorized_by resp_writer
+{
+    let enc: svc.framing.Encoded = svc.framing.encode(op, payload, payload_len);
+    let view: [byte; up_to 64] = svc.framing.narrow(enc.bytes, enc.length);
+    return host_write(view);
+}
+
+// Rejection path: op 0 with the single-byte error rank.
+fn reject(rank: u64) -> (result: u64)
+    capability resp_writer
+    effect host_write authorized_by resp_writer
+{
+    let body: [byte; 64] = replace(svc.framing.blank(), 0, (rank % 256) as byte);
+    let enc: svc.framing.Encoded = svc.framing.encode(0, body, 1);
+    let view: [byte; up_to 64] = svc.framing.narrow(enc.bytes, enc.length);
+    return host_write(view);
+}

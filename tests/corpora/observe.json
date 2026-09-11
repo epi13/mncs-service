@@ -1,0 +1,29 @@
+{
+ "schema_version": "0.1",
+ "name": "svc-observe",
+ "cases": [
+  {
+   "id": "stream",
+   "request": {
+    "schema_version": "0.1",
+    "target": {
+     "module": "svc.observe",
+     "function": "candidate_observe"
+    },
+    "arguments": [],
+    "step_budget": 32768
+   },
+   "expected": [
+    {
+     "integer": {
+      "value": 111212,
+      "type": {
+       "bits": 64,
+       "signed": true
+      }
+     }
+    }
+   ]
+  }
+ ]
+}

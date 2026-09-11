@@ -1,0 +1,234 @@
+mncs 0.13;
+
+// svc.service — vertical composition: one service value.
+//
+// `Service` threads the framework's primitives into a single state a
+// host runtime can step: lifecycle phase, bounded request queue, fixed
+// worker pool, machine-readable contract, observability stream, and the
+// validated configuration it was assembled from. Every cross-module rule
+// lives in the admission and completion paths:
+//
+// - `admit_request` accepts work only when the lifecycle admits, the op
+//   is declared in the contract, the width fits, and the queue takes it.
+//   Each refusal carries a typed `svc.errors.Error`, and every outcome
+//   tallies the observability stream — accepted and counted together.
+// - `complete_job` settles a BUSY worker, tallies completion or failure,
+//   and retires the slot so dispatch can proceed.
+// - `snapshot` packs phase rank, health rank, queue depth, busy workers,
+//   and counters for ledgers and corpora.
+//
+// The host runtime simulator (`docs/rfcs/0002-*.md`, `tools/`) drives
+// these steps with real grants; the decisions stay in-language.
+module svc.service;
+
+use svc.lifecycle;
+use svc.errors;
+use svc.queue;
+use svc.worker;
+use svc.contract;
+use svc.observe;
+use svc.config;
+
+record Service {
+    life: svc.lifecycle.Svc,
+    queue: svc.queue.Queue,
+    pool: svc.worker.Pool,
+    contract: svc.contract.Contract,
+    obs: svc.observe.Obs,
+    config: svc.config.Config
+}
+
+record SAdmit { service: Service, accepted: bool, error: svc.errors.Error }
+
+record SettleOut { service: Service, accepted: bool }
+
+// Assemble a service from validated configuration and a contract.
+// The lifecycle starts CONSTRUCTED: the operator must still drive
+// configure -> start -> mark_ready explicitly (see the minimal example).
+fn assemble(cfg: svc.config.Config, c: svc.contract.Contract) -> (result: Service) {
+    return Service {
+        life: svc.lifecycle.boot(),
+        queue: svc.queue.open(cfg.queue_cap),
+        pool: svc.worker.open(cfg.workers),
+        contract: c,
+        obs: svc.observe.open(),
+        config: cfg
+    };
+}
+
+// Structural invariant across the composition: lifecycle epoch sane
+// (always true — carried for future bounds), queue and pool shapes
+// valid. Corpora assert this after every composed sequence.
+fn valid(s: Service) -> (result: bool) {
+    return svc.queue.valid(s.queue) && svc.worker.valid(s.pool);
+}
+
+// Admit one envelope under `policy` at instant `now`. Refusal order is
+// deterministic: lifecycle gate, contract lookup, width check, queue
+// admission. Error codes: 10 = lifecycle refuses (not serving;
+// OVERLOAD so the caller backs off and retries later or elsewhere),
+// 11 = undeclared op, 12 = over-wide request; queue-full codes come
+// from `svc.queue` (OVERLOAD 1/2/3).
+fn admit_request(s: Service, env: svc.queue.Envelope, policy: svc.queue.Shed, now: u64) -> (result: SAdmit) {
+    if !svc.lifecycle.admits(s.life) {
+        let o1: svc.observe.Obs = svc.observe.tally_refused(s.obs);
+        let e1: svc.observe.Emitted = svc.observe.record_event(o1, 2, now, 10);
+        let svc1: Service = Service { ..s, obs: e1.obs };
+        return SAdmit { service: svc1, accepted: false, error: svc.errors.make(svc.errors.Class.OVERLOAD, 10) };
+    } else {
+    }
+    let hit: svc.contract.Found = svc.contract.find(s.contract, env.op);
+    if !hit.found {
+        let o2: svc.observe.Obs = svc.observe.tally_refused(s.obs);
+        let e2: svc.observe.Emitted = svc.observe.record_event(o2, 2, now, 11);
+        let svc2: Service = Service { ..s, obs: e2.obs };
+        return SAdmit { service: svc2, accepted: false, error: svc.errors.make(svc.errors.Class.PROTOCOL, 11) };
+    } else {
+    }
+    // The envelope always carries exactly 3 words (op, arg0, arg1).
+    if !svc.contract.width_ok(hit.op, 3) {
+        let o3: svc.observe.Obs = svc.observe.tally_refused(s.obs);
+        let e3: svc.observe.Emitted = svc.observe.record_event(o3, 2, now, 12);
+        let svc3: Service = Service { ..s, obs: e3.obs };
+        return SAdmit { service: svc3, accepted: false, error: svc.errors.make(svc.errors.Class.PROTOCOL, 12) };
+    } else {
+    }
+    let a: svc.queue.Admit = svc.queue.admit(s.queue, env, policy);
+    if a.accepted {
+        let o4: svc.observe.Obs = svc.observe.tally_admitted(s.obs);
+        let e4: svc.observe.Emitted = svc.observe.record_event(o4, 2, now, env.id);
+        let svc4: Service = Service { ..s, queue: a.queue, obs: e4.obs };
+        return SAdmit { service: svc4, accepted: true, error: a.error };
+    } else {
+    }
+    let o5: svc.observe.Obs = svc.observe.tally_refused(s.obs);
+    let e5: svc.observe.Emitted = svc.observe.record_event(o5, 5, now, env.id);
+    let svc5: Service = Service { ..s, queue: a.queue, obs: e5.obs };
+    return SAdmit { service: svc5, accepted: false, error: a.error };
+}
+
+// Settle a BUSY worker and tally the outcome. `code` is preserved on
+// the worker note and in the event stream. DONE/FAILED slots still need
+// `svc.worker.retire` before re-dispatch — settling never recycles.
+fn complete_job(s: Service, w: u64, ok: bool, code: u64, now: u64, policy: svc.worker.FailPolicy) -> (result: SettleOut) {
+    let st: svc.worker.Settle = svc.worker.settle(s.pool, w, ok, code, policy);
+    if !st.accepted {
+        return SettleOut { service: s, accepted: false };
+    } else {
+    }
+    if ok {
+        let o1: svc.observe.Obs = svc.observe.tally_completed(s.obs);
+        let e1: svc.observe.Emitted = svc.observe.record_event(o1, 3, now, code);
+        return SettleOut { service: Service { ..s, pool: st.pool, obs: e1.obs }, accepted: true };
+    } else {
+    }
+    let o2: svc.observe.Obs = svc.observe.tally_failed(s.obs);
+    let e2: svc.observe.Emitted = svc.observe.record_event(o2, 4, now, code);
+    return SettleOut { service: Service { ..s, pool: st.pool, obs: e2.obs }, accepted: true };
+}
+
+// Ledger snapshot: phase rank, health rank, queue depth, busy workers,
+// admitted/completed/failed counters. Ranks follow declaration order.
+fn snapshot(s: Service) -> (result: Snap) {
+    let phase_rank: u64 = match s.life.phase {
+        CONSTRUCTED => 0,
+        CONFIGURED => 1,
+        STARTING => 2,
+        READY => 3,
+        DEGRADED => 4,
+        DRAINING => 5,
+        STOPPING => 6,
+        STOPPED => 7,
+        FAILED => 8,
+    };
+    let h: svc.observe.Health = svc.observe.health_of(s.life, svc.queue.depth(s.queue), s.config.queue_cap);
+    let health_rank: u64 = match h {
+        HEALTHY => 0,
+        DEGRADED => 1,
+        DOWN => 2,
+    };
+    return Snap {
+        phase_rank: phase_rank,
+        health_rank: health_rank,
+        depth: svc.queue.depth(s.queue),
+        busy: svc.worker.busy(s.pool),
+        admitted: s.obs.counters.admitted,
+        completed: s.obs.counters.completed,
+        failed: s.obs.counters.failed
+    };
+}
+
+record Snap {
+    phase_rank: u64,
+    health_rank: u64,
+    depth: u64,
+    busy: u64,
+    admitted: u64,
+    completed: u64,
+    failed: u64
+}
+
+// --- Executable test entries ---
+
+// Composed admission: a READY service admits a declared op, refuses an
+// undeclared op (PROTOCOL/11), refuses everything before READY
+// (OVERLOAD/10, retryable by the caller), and sheds at capacity
+// (OVERLOAD). Snapshot tallies. Packs to 112001.
+fn candidate_service_admit() -> (result: i64) {
+    let cfg: svc.config.Config = svc.config.defaults();
+    let read: svc.contract.Op = svc.contract.Op { id: 1, input_words: 3, idempotent: true, pure: true, max_ms: 500 };
+    let write: svc.contract.Op = svc.contract.Op { id: 2, input_words: 3, idempotent: false, pure: false, max_ms: 2000 };
+    let c: svc.contract.Contract = svc.contract.contract2(77, read, write);
+    let s0: Service = assemble(cfg, c);
+    let early: SAdmit = admit_request(s0, envelope(1, 1), svc.queue.Shed.REJECT, 1000);
+    let gated: bool = !early.accepted && early.error.code == 10;
+    let s1: Service = bring_ready(early.service);
+    let a1: SAdmit = admit_request(s1, envelope(1, 1), svc.queue.Shed.REJECT, 1010);
+    let a2: SAdmit = admit_request(a1.service, envelope(2, 2), svc.queue.Shed.REJECT, 1020);
+    let a3: SAdmit = admit_request(a2.service, envelope(3, 99), svc.queue.Shed.REJECT, 1030);
+    let unknown: bool = !a3.accepted && a3.error.code == 11;
+    let a4: SAdmit = admit_request(a3.service, envelope(4, 1), svc.queue.Shed.REJECT, 1040);
+    let a5: SAdmit = admit_request(a4.service, envelope(5, 2), svc.queue.Shed.REJECT, 1050);
+    let a6: SAdmit = admit_request(a5.service, envelope(6, 1), svc.queue.Shed.REJECT, 1060);
+    let a7: SAdmit = admit_request(a6.service, envelope(7, 2), svc.queue.Shed.REJECT, 1070);
+    let a8: SAdmit = admit_request(a7.service, envelope(8, 1), svc.queue.Shed.REJECT, 1080);
+    let a9: SAdmit = admit_request(a8.service, envelope(9, 2), svc.queue.Shed.REJECT, 1090);
+    let a10: SAdmit = admit_request(a9.service, envelope(10, 1), svc.queue.Shed.REJECT, 1100);
+    let saturated: bool = a4.accepted && a5.accepted && a6.accepted && a7.accepted && a8.accepted && a9.accepted && !a10.accepted && a10.error.code == 1;
+    let snap: Snap = snapshot(a10.service);
+    let tallied: bool = a1.accepted && a2.accepted && unknown && saturated && snap.admitted == 8 && snap.depth == 8 && valid(a10.service);
+    let ok: bool = gated && tallied;
+    return select(ok, 112001, 0 - 1);
+}
+
+fn envelope(id: u64, op: u64) -> (result: svc.queue.Envelope) {
+    return svc.queue.Envelope { id: id, op: op, deadline: 9000, arg0: 0, arg1: 0 };
+}
+
+fn bring_ready(s: Service) -> (result: Service) {
+    let t0: svc.lifecycle.Transition = svc.lifecycle.configure(s.life);
+    let t1: svc.lifecycle.Transition = svc.lifecycle.start(t0.state);
+    let t2: svc.lifecycle.Transition = svc.lifecycle.mark_ready(t1.state);
+    return Service { ..s, life: t2.state };
+}
+
+// Composed completion: dispatch through the pool, settle ok and failed,
+// snapshot counters. Packs completed/failed/busy to 112002.
+fn candidate_service_complete() -> (result: i64) {
+    let cfg: svc.config.Config = svc.config.defaults();
+    let read: svc.contract.Op = svc.contract.Op { id: 1, input_words: 3, idempotent: true, pure: true, max_ms: 500 };
+    let c: svc.contract.Contract = svc.contract.contract1(77, read);
+    let s0: Service = bring_ready(assemble(cfg, c));
+    let graded: svc.worker.FailPolicy = svc.worker.FailPolicy { abort_pool: false, max_attempts: 3 };
+    let d0: svc.worker.Dispatch = svc.worker.dispatch(s0.pool, 11, 1000);
+    let s1: Service = Service { ..s0, pool: d0.pool };
+    let d1: svc.worker.Dispatch = svc.worker.dispatch(s1.pool, 22, 1010);
+    let s2: Service = Service { ..s1, pool: d1.pool };
+    let c0: SettleOut = complete_job(s2, 0, true, 0, 1020, graded);
+    let c1: SettleOut = complete_job(c0.service, 1, false, 5, 1030, graded);
+    let c2: SettleOut = complete_job(c1.service, 1, true, 0, 1040, graded);
+    let no_double: bool = !c2.accepted;
+    let snap: Snap = snapshot(c1.service);
+    let counted: bool = c0.accepted && c1.accepted && no_double && snap.completed == 1 && snap.failed == 1 && snap.busy == 0 && snap.phase_rank == 3 && snap.health_rank == 0;
+    return select(counted, 112002, 0 - 1);
+}
