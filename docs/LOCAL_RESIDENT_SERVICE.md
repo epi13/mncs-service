@@ -23,3 +23,10 @@ Every response carries:
 
 The scheduled `tools/vertical_path.py` proof restarts the service after
 reopening Store and rebuilding Index from typed records.
+
+That proof uses the Commons pressure declaration and its bounded observation
+history as an external source, then stores a native Ingest handoff, a typed
+semantic-state payload, first-class relations, provenance, and a commit feed.
+The semantic-state payload preserves source/lifecycle/severity codes and
+evidence/supersession set identities; Commons remains authoritative for their
+meaning. JSON appears only at the declaration and final projection edges.

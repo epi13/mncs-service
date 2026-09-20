@@ -190,6 +190,93 @@ def _legacy_scan() -> dict:
     }
 
 
+def _pressure_history(record: dict) -> dict:
+    """Read the bounded Commons history needed for the typed state handoff.
+
+    This is an external declaration/event boundary. The adapter derives
+    stable set identities from reviewed Commons records, while Store
+    receives only typed identities and producer-supplied codes. Store does
+    not decide pressure lifecycle or evidence meaning.
+    """
+    observation_paths = sorted(
+        (COMMONS_ROOT / "pressures" / "observations").glob(f"{PRESSURE_ID}--*.json")
+    )
+    event_paths = sorted(
+        (COMMONS_ROOT / "pressures" / "events").glob(f"{PRESSURE_ID}--*.json")
+    )
+    observations = [json.loads(path.read_text(encoding="utf-8")) for path in observation_paths]
+    events = [json.loads(path.read_text(encoding="utf-8")) for path in event_paths]
+    evidence = []
+    for observation in observations:
+        evidence.extend(observation.get("evidence", []))
+    evidence = sorted(evidence, key=lambda value: _canonical_json(value))
+    supersession = {
+        "record": [
+            relation
+            for relation in record.get("relationships", [])
+            if relation.get("type") in {"supersedes", "duplicate_of"}
+        ],
+        "events": [
+            event
+            for event in events
+            if event.get("relation") in {"supersedes", "duplicate_of"}
+        ],
+    }
+    evidence_identity = _digest(
+        b"commons.pressure.evidence-set/v1\0" + _canonical_json(evidence)
+    )
+    supersession_identity = _digest(
+        b"commons.pressure.supersession-set/v1\0" + _canonical_json(supersession)
+    )
+    latest_observation = max(
+        observations,
+        key=lambda value: (str(value.get("observedAt", "")), str(value.get("id", ""))),
+        default={},
+    )
+    classification = latest_observation.get("metadata", {}).get("classification")
+    lifecycle_codes = {
+        "discovered": 0,
+        "confirmed": 1,
+        "accepted": 2,
+        "implementing": 3,
+        "available": 4,
+        "verifying": 5,
+        "resolved": 6,
+        "deferred": 7,
+        "rejected": 8,
+        "duplicate": 9,
+        "superseded": 10,
+        "obsolete": 11,
+    }
+    severity_codes = {
+        "blocker": 0,
+        "critical": 1,
+        "major": 2,
+        "minor": 3,
+        "informational": 4,
+    }
+    completeness_codes = {
+        None: 0,
+        "resolved": 0,
+        "partially_resolved": 1,
+        "partial": 1,
+        "still_real": 2,
+        "reframed": 3,
+    }
+    return {
+        "observation_paths": observation_paths,
+        "event_paths": event_paths,
+        "evidence_identity": evidence_identity,
+        "supersession_identity": supersession_identity,
+        "lifecycle_code": lifecycle_codes.get(record.get("initialStatus"), 255),
+        "severity_code": severity_codes.get(record.get("severity"), 255),
+        "completeness_code": completeness_codes.get(classification, 255),
+        "classification": classification,
+        "evidence_count": len(evidence),
+        "supersession_count": len(supersession["record"]) + len(supersession["events"]),
+    }
+
+
 def _relation(engine, kind, source, target, generation, provenance, ordinal):
     return _native_bytes(
         engine,
@@ -213,6 +300,35 @@ def _provenance(engine, source, producer, transformation, generation, evidence, 
             U64(generation),
             BYTES(evidence),
             BYTES(ancestry),
+        ],
+    )
+
+
+def _semantic_state(
+    engine,
+    semantic_subject,
+    source_content,
+    lifecycle,
+    severity,
+    evidence_identity,
+    supersession_identity,
+    generation,
+    completeness,
+):
+    return _native_bytes(
+        engine,
+        "src/store/semantic_state.mncs",
+        "store.semantic_state.v1",
+        "encode_fields",
+        [
+            BYTES(semantic_subject),
+            BYTES(source_content),
+            U64(lifecycle),
+            U64(severity),
+            BYTES(evidence_identity),
+            BYTES(supersession_identity),
+            U64(generation),
+            U64(completeness),
         ],
     )
 
@@ -241,6 +357,7 @@ def _query_projection(service, target):
 def main() -> dict:
     legacy = _legacy_scan()
     record = json.loads(PRESSURE_PATH.read_text(encoding="utf-8"))
+    history = _pressure_history(record)
     handoff, ingest_report = _run_ingest(record)
     source_identity = bytes.fromhex(ingest_report["source_identity"])
     producer_identity = bytes.fromhex(ingest_report["producer_identity"])
@@ -252,33 +369,86 @@ def main() -> dict:
     store_path = Path(store_directory.name) / "store"
     try:
         store = StorePhase2.create(store_path, engine=engine)
+        consumer_repositories = tuple(record.get("affectedRepositories", ()))
+        consumer_items = [
+            (f"consumer:{repository}", _digest(f"repository:{repository}".encode()))
+            for repository in consumer_repositories
+        ]
+        generation = store._gen + 1
+        semantic_state = _semantic_state(
+            engine,
+            semantic_identity,
+            source_identity,
+            history["lifecycle_code"],
+            history["severity_code"],
+            history["evidence_identity"],
+            history["supersession_identity"],
+            generation,
+            history["completeness_code"],
+        )
         object_ids = store.put_general_many(
             [
                 ("pressure", handoff),
-                ("consumer", _digest(b"repository:mncs-store")),
+                *consumer_items,
                 ("capability", semantic_identity),
                 ("source", source_identity),
+                ("semantic-state", semantic_state),
             ]
         )
-        pressure_id, consumer_id, capability_id, source_id = object_ids
-        generation = store._gen
+        pressure_id = object_ids[0]
+        consumer_ids = {
+            repository: object_ids[index + 1]
+            for index, repository in enumerate(consumer_repositories)
+        }
+        consumer_id = consumer_ids["mncs-store"]
+        capability_id = object_ids[1 + len(consumer_items)]
+        source_id = object_ids[2 + len(consumer_items)]
+        semantic_state_id = object_ids[3 + len(consumer_items)]
         provenance = _provenance(
             engine,
             source_identity[:12],
             producer_identity[:12],
             transformation_identity[:12],
             generation,
-            source_identity,
-            _digest(b"mncs-store:ancestry:none/v1"),
+            history["evidence_identity"],
+            history["supersession_identity"],
         )
         provenance_identity = _digest(provenance)
         relations = [
             _relation(engine, 1, pressure_id, source_id, generation, provenance_identity, 0),
-            _relation(engine, 2, pressure_id, consumer_id, generation, provenance_identity, 1),
-            _relation(engine, 3, pressure_id, capability_id, generation, provenance_identity, 2),
+            *[
+                _relation(
+                    engine,
+                    2,
+                    pressure_id,
+                    consumer_ids[repository],
+                    generation,
+                    provenance_identity,
+                    index + 1,
+                )
+                for index, repository in enumerate(consumer_repositories)
+            ],
+            _relation(
+                engine,
+                3,
+                pressure_id,
+                capability_id,
+                generation,
+                provenance_identity,
+                len(consumer_items) + 1,
+            ),
         ]
-        feed = _feed(engine, generation, len(object_ids), len(relations), 1, source_identity)
+        feed_root = _digest(
+            b"commons.pressure.commit-root/v1\0"
+            + source_identity
+            + semantic_identity
+            + history["evidence_identity"]
+            + history["supersession_identity"]
+        )
+        feed = _feed(engine, generation, len(object_ids), len(relations), 1, feed_root)
         store.persist_typed_commit(feed, relations, [provenance])
+        stored_semantic_state = store.get_blob(semantic_state_id)
+        semantic_state_round_trip = stored_semantic_state == semantic_state
 
         def load_commit(current_store):
             return StoreCommit(
@@ -341,6 +511,7 @@ def main() -> dict:
         restart_service.start()
         restart_query = _query_projection(restart_service, consumer_id)
         restart_service.close()
+        restarted_semantic_state_round_trip = reopened.get_blob(semantic_state_id) == semantic_state
         reopened.close()
         engine.close()
         retained_metrics = engine.metrics()
@@ -356,6 +527,11 @@ def main() -> dict:
                 "semantic_parity": {
                     "id_preserved": record["id"] == PRESSURE_ID,
                     "status_not_reinterpreted_by_store": True,
+                    "lifecycle_code": history["lifecycle_code"],
+                    "severity_code": history["severity_code"],
+                    "completeness_code": history["completeness_code"],
+                    "evidence_identity": history["evidence_identity"].hex(),
+                    "supersession_identity": history["supersession_identity"].hex(),
                     "affected_consumer_relation_present": any(
                         relation.kind == 2 and relation.target == consumer_id for relation in commit.relations
                     ),
@@ -369,7 +545,10 @@ def main() -> dict:
                 "relation_count": len(commit.relations),
                 "provenance_count": len(commit.provenance),
                 "handoff_is_not_json": handoff[:4] == b"IH\x01\x00",
-                "typed_records_round_trip": True,
+                "semantic_state_bytes": len(semantic_state),
+                "semantic_state_round_trip": semantic_state_round_trip,
+                "restarted_semantic_state_round_trip": restarted_semantic_state_round_trip,
+                "typed_records_round_trip": semantic_state_round_trip,
             },
             "index": {
                 "destroy_rebuild_same_result_identity": index_rebuild_equal,
