@@ -1,0 +1,17 @@
+{
+  "schema_version": "mncs-family.repository-manifest/v0alpha1",
+  "repository": "mncs-service",
+  "revision": 1,
+  "manifest_location": "in-repository",
+  "authority": {"note": "Service owns generic resident lifecycle, bounded request admission, and Store/Index query serving; it does not own Store persistence or Commons meaning."},
+  "contracts": {
+    "provides": [
+      {"contract": "resident-query-service", "version": "1", "kind": "serving-contract", "stability": "experimental", "fingerprint_sources": ["src/svc/store_index_protocol.mncs", "tools/resident_service.py"]}
+    ],
+    "consumes": [
+      {"contract": "mncs.store.persistent-state/1", "envelope": {"op": "exact", "version": "1"}, "required": true, "evidence_refs": ["tools/resident_service.py"]},
+      {"contract": "mncs.index.derived-index/1", "envelope": {"op": "exact", "version": "1"}, "required": true, "evidence_refs": ["tools/resident_service.py"]}
+    ],
+    "tests": [{"test": "service-store-index-boundary", "covers": ["resident-query-service"], "obligation": "self", "command": {"argv": ["python3", "-m", "pytest", "tests/test_resident_service.py", "-q"]}}, {"test": "service-native-suite", "covers": ["resident-query-service"], "obligation": "scheduled", "command": {"argv": ["python3", "tools/svc_test.py", "--suite", "unit"]}}]
+  }
+}

@@ -1,0 +1,43 @@
+{
+  "schema_version": "mncs-family.verification-obligation-inventory/v1",
+  "repository": "mncs-service",
+  "revision": 2,
+  "obligations": [
+    {
+      "identity": "mncs-service.store-index.admission",
+      "title": "Resident Service admits bounded Store/Index requests and exposes typed overload/freshness states",
+      "guarantee_domain": "family_contract",
+      "evidence_role": "canonical_regression",
+      "lifecycle": "permanent",
+      "scope": "family",
+      "subjects": ["mncs.service.resident-query/1"],
+      "invalidation_dependencies": ["src/svc/store_index_protocol.mncs", "tools/resident_service.py"],
+      "executor": {"provider": "mncs-service", "kind": "native_first_class_test", "entrypoint": "tests/test_resident_service.py"},
+      "evidence_identity": {"subject_fields": ["operation_identity"], "definition_fields": ["admission_policy_identity"], "execution_fields": ["response_identity"]}
+    },
+    {
+      "identity": "mncs-service.store-index.restart",
+      "title": "Stopping and recreating the local resident boundary preserves query semantics supplied by Store/Index",
+      "guarantee_domain": "family_contract",
+      "evidence_role": "conformance",
+      "lifecycle": "permanent",
+      "scope": "consumer",
+      "subjects": ["mncs.service.resident-query/1", "mncs.index.derived-index/1"],
+      "invalidation_dependencies": ["tools/resident_service.py", "tests/test_resident_service.py"],
+      "executor": {"provider": "mncs-service", "kind": "external_integration", "entrypoint": "tests/test_resident_service.py::test_restart_reproduces_generation_aware_result"},
+      "evidence_identity": {"subject_fields": ["store_generation", "index_through_generation"], "definition_fields": ["source_authority"], "execution_fields": ["result_identity"]}
+    },
+    {
+      "identity": "mncs-service.commons-pressure.vertical-path",
+      "title": "A current Commons pressure record crosses native Ingest, Store, Index, and resident Service with generation-aware parity",
+      "guarantee_domain": "family_contract",
+      "evidence_role": "scheduled_conformance",
+      "lifecycle": "permanent",
+      "scope": "family",
+      "subjects": ["mncs.ingest.typed-handoff/1", "mncs.store.persistent-state/1", "mncs.index.derived-index/1", "mncs.service.resident-query/1"],
+      "invalidation_dependencies": ["tools/vertical_path.py", "../mncs-ingest/language/mncs/ingest/handoff.mncs", "../mncs-store/src/store/relationship.mncs", "../mncs-index/runner/mncs_index/store_feed.py"],
+      "executor": {"provider": "mncs-service", "kind": "external_integration", "entrypoint": "tools/vertical_path.py"},
+      "evidence_identity": {"subject_fields": ["source_identity", "result_identity"], "definition_fields": ["source_authority"], "execution_fields": ["store_generation", "index_through_generation", "complete"]}
+    }
+  ]
+}

@@ -1,0 +1,39 @@
+{
+  "schema_version": "commons.mncs.semantic-contract-declarations/v1",
+  "repository_id": "mncs-service",
+  "revision": "1",
+  "provides": [
+    {
+      "contract_identity": "mncs.service.resident-query/1",
+      "contract_revision": "1",
+      "exported_identity": "mncs-service:resident-query",
+      "evidence": "src/svc/store_index_protocol.mncs"
+    }
+  ],
+  "consumes": [
+    {
+      "contract_identity": "mncs.store.persistent-state/1",
+      "contract_revision": "1",
+      "consumer_identity": "mncs-service:store-state",
+      "evidence": "tools/resident_service.py",
+      "verification": {
+        "check_identity": "mncs-service:store-state-input",
+        "executor": "mncs-service",
+        "surface": "store-generation-to-resident-query",
+        "evidence": "family-verification-checks-v1.json"
+      }
+    },
+    {
+      "contract_identity": "mncs.index.derived-index/1",
+      "contract_revision": "1",
+      "consumer_identity": "mncs-service:derived-index",
+      "evidence": "tools/resident_service.py",
+      "verification": {
+        "check_identity": "mncs-service:derived-index-input",
+        "executor": "mncs-service",
+        "surface": "derived-index-to-resident-query",
+        "evidence": "family-verification-checks-v1.json"
+      }
+    }
+  ]
+}

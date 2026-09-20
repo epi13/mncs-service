@@ -1,0 +1,19 @@
+{
+  "schema_version": "mncs.native-userland-audit/1",
+  "repository_id": "mncs-service",
+  "profile_revalidation": {
+    "historical_source_profile": "0.13",
+    "minimum_profile_required_by_current_sources": "0.13",
+    "current_family_compatibility": "0.18",
+    "reason": "The Store/Index protocol uses only existing bounded scalar/control-flow semantics. Current 0.18 task/channel/process/filesystem/test facilities do not imply real runtime concurrency or networking, so no profile bump is claimed."
+  },
+  "pressure_reclassification": [
+    {"legacy": "SVC-P-001", "status": "partially_resolved", "note": "Task/channel state-machine semantics exist; actual concurrent runtime execution remains absent."},
+    {"legacy": "SVC-P-002", "status": "still_real", "note": "Networking/socket effects are not required for the first local stdio service and remain unimplemented."},
+    {"legacy": "SVC-P-009", "status": "partially_resolved", "note": "A bounded typed local request/response contract is admitted and called through a retained native protocol artifact; transport is still host-side."},
+    {"legacy": "SVC-P-010", "status": "still_real", "note": "Generic recursive protocol values remain absent; the first service contract is deliberately flat and bounded."},
+    {"legacy": "SVC-P-014", "status": "partially_resolved", "note": "Filesystem/process effects are available in current profiles, but grant realization remains an external boundary."},
+    {"legacy": "SVC-P-015", "status": "partially_resolved", "note": "Lifecycle, admission, freshness, release, and shutdown decisions now execute through the retained native protocol; actual runtime timers/concurrency remain external."},
+    {"legacy": "SVC-P-021", "status": "still_real", "note": "WASM service-shaped divergence remains pinned by the existing suite."}
+  ]
+}

@@ -260,7 +260,8 @@ def static_suite(ctx):
 # Unit suite.
 
 UNIT = ["lifecycle", "errors", "retry", "time", "queue", "worker",
-        "framing", "config", "observe", "contract", "shutdown", "service"]
+        "framing", "config", "observe", "contract", "shutdown", "service",
+        "store_index_protocol"]
 
 # Backend-differential pins (SVC-P-021), observed under the compiler
 # binary recorded in the suite header (see PINNED_BINARY_SHA below).

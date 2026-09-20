@@ -1,0 +1,43 @@
+mncs 0.13;
+
+// svc.store_index_protocol — the generic local serving contract for a
+// resident Store/Index boundary. The transport is deliberately absent here:
+// lifecycle, admission, freshness, bounded responses, and shutdown policy
+// are typed MNCS decisions; stdio/Unix sockets remain host adapters.
+module svc.store_index_protocol;
+
+// Freshness: 0 complete, 1 stale, 2 impossible future index.
+fn freshness(index_through_generation: u64, store_generation: u64) -> (result: u64) {
+    if index_through_generation == store_generation { return 0; }
+    if index_through_generation < store_generation { return 1; }
+    return 2;
+}
+
+// Admission: 0 accepted, 1 not ready, 2 backpressure, 3 malformed limit.
+fn admit(ready: bool, in_flight: u64, max_in_flight: u64, requested_limit: u64) -> (result: u64) {
+    if !ready { return 1; }
+    if requested_limit == 0 { return 3; }
+    if max_in_flight == 0 || in_flight >= max_in_flight { return 2; }
+    return 0;
+}
+
+// A bounded result is complete only when the Index has caught up and the
+// request has a nonzero result limit. The source authority is supplied by
+// the caller as metadata; Service never derives Commons meaning.
+fn response_complete(index_through_generation: u64, store_generation: u64, requested_limit: u64) -> (result: bool) {
+    return freshness(index_through_generation, store_generation) == 0 && requested_limit > 0;
+}
+
+// Lifecycle-side accounting is separate from the query result. A completed
+// request decrements one admitted slot; underflow is fail-closed at zero.
+fn release(in_flight: u64) -> (result: u64) {
+    if in_flight == 0 { return 0; }
+    return in_flight -% 1;
+}
+
+// Shutdown policy: 0 may stop now, 1 must drain, 2 already terminal.
+fn shutdown_decision(admitted: u64, stopping: bool, stopped: bool) -> (result: u64) {
+    if stopped { return 2; }
+    if stopping && admitted == 0 { return 0; }
+    return 1;
+}

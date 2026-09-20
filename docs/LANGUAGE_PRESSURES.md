@@ -7,6 +7,35 @@ service component, the intended design, the observed compiler/runtime
 behavior, a minimal reproducer (in-repo unless noted), the workaround
 used, and the desired capability.
 
+## Current Profile 0.18 reconciliation (2026-09-20)
+
+The historical `SVC-P-*` entries below remain reproducers and evidence, not a
+second current family ledger. The first resident Store/Index service slice now
+has a retained native contract for bounded admission, freshness, response
+completion, release, and shutdown. That resolves only the corresponding
+deterministic service decisions. It does not claim real task scheduling,
+socket/network effects, dynamic effect realization, recursive protocol values,
+or timer/concurrency semantics.
+
+Current classifications are authoritative in `native-userland-audit.json`:
+
+| Pressure | Current classification | Boundary |
+| --- | --- | --- |
+| SVC-P-001 | partially resolved | task/channel state-machine semantics exist; runtime scheduling/concurrency remains external |
+| SVC-P-002 | still real | the first local stdio adapter does not provide socket/network effects |
+| SVC-P-009 | partially resolved | the bounded Store/Index protocol is native and retained; transport remains host-side |
+| SVC-P-010 | still real | the first protocol is flat/bounded; generic recursive values remain absent |
+| SVC-P-014 | partially resolved | bounded effects exist, but grant realization is still an external boundary |
+| SVC-P-015 | partially resolved | lifecycle decisions are native; timers, scheduling, and randomness remain external |
+| SVC-P-021 | still real | the pinned WASM differential remains an active backend pressure |
+
+No blanket profile declaration was raised to 0.18: the new protocol itself
+uses Profile 0.13 semantics, while 0.18 is the family compatibility ceiling.
+The current workspace language source head is
+`efa76ca47a5a65accf847230dedd6974ef40e39e`; older compiler/profile pins in
+the historical rows remain evidence labels rather than current capability
+claims.
+
 Conventions:
 
 - **Reproducer paths** are relative to this repository unless prefixed

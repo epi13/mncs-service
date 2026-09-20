@@ -1,0 +1,11 @@
+{
+  "schema_version": "0.1",
+  "name": "store_index_protocol",
+  "cases": [
+    {"id": "fresh", "request": {"schema_version": "0.1", "target": {"module": "svc.store_index_protocol", "function": "freshness"}, "arguments": [{"integer": {"value": 7, "type": {"bits": 64, "signed": false}}}, {"integer": {"value": 7, "type": {"bits": 64, "signed": false}}}], "step_budget": 8192}, "expected": [{"integer": {"value": 0, "type": {"bits": 64, "signed": false}}}]},
+    {"id": "stale", "request": {"schema_version": "0.1", "target": {"module": "svc.store_index_protocol", "function": "freshness"}, "arguments": [{"integer": {"value": 7, "type": {"bits": 64, "signed": false}}}, {"integer": {"value": 8, "type": {"bits": 64, "signed": false}}}], "step_budget": 8192}, "expected": [{"integer": {"value": 1, "type": {"bits": 64, "signed": false}}}]},
+    {"id": "admitted", "request": {"schema_version": "0.1", "target": {"module": "svc.store_index_protocol", "function": "admit"}, "arguments": [{"boolean": {"value": true}}, {"integer": {"value": 1, "type": {"bits": 64, "signed": false}}}, {"integer": {"value": 4, "type": {"bits": 64, "signed": false}}}, {"integer": {"value": 8, "type": {"bits": 64, "signed": false}}}], "step_budget": 8192}, "expected": [{"integer": {"value": 0, "type": {"bits": 64, "signed": false}}}]},
+    {"id": "overloaded", "request": {"schema_version": "0.1", "target": {"module": "svc.store_index_protocol", "function": "admit"}, "arguments": [{"boolean": {"value": true}}, {"integer": {"value": 4, "type": {"bits": 64, "signed": false}}}, {"integer": {"value": 4, "type": {"bits": 64, "signed": false}}}, {"integer": {"value": 8, "type": {"bits": 64, "signed": false}}}], "step_budget": 8192}, "expected": [{"integer": {"value": 2, "type": {"bits": 64, "signed": false}}}]},
+    {"id": "drain", "request": {"schema_version": "0.1", "target": {"module": "svc.store_index_protocol", "function": "shutdown_decision"}, "arguments": [{"integer": {"value": 0, "type": {"bits": 64, "signed": false}}}, {"boolean": {"value": true}}, {"boolean": {"value": false}}], "step_budget": 8192}, "expected": [{"integer": {"value": 0, "type": {"bits": 64, "signed": false}}}]}
+  ]
+}

@@ -1,0 +1,17 @@
+{
+  "schema_version": "mncs.native-userland-status/1",
+  "repository_id": "mncs-service",
+  "status": "native_contract_with_retained_protocol_and_resident_host_transport",
+  "canonical_entrypoint": "local stdio ResidentQueryService over Store/Index handles and retained protocol artifact",
+  "native_sources": {
+    "store_index_request_admission_freshness_shutdown": "src/svc/store_index_protocol.mncs",
+    "retained_protocol_adapter": "tools/native_protocol.py",
+    "existing_service_lifecycle_and_failure_contracts": "src/svc/*.mncs"
+  },
+  "host_boundary": [
+    {"path": "tools/resident_service.py", "role": "stdio transport, handle residency, Store/Index adapter, JSON projection", "canonical": false},
+    {"path": "tools/native_protocol.py", "role": "retained artifact admission and native lifecycle/admission/freshness calls", "canonical": false},
+    {"path": "network/socket adapters", "role": "not implemented; networking remains a genuine runtime pressure", "canonical": false}
+  ],
+  "next_migration_slice": "make retained protocol admission the default construction path and add a platform adapter for Unix-socket serving without moving transport semantics into MNCS"
+}
