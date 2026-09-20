@@ -1,12 +1,13 @@
 mncs 0.13;
 
-// Backend-differential canary for SVC-P-021.
+// Backend-differential canary retained from the historical SVC-P-021
+// investigation. Current builds must agree across research and WASM.
 //
 // A `match` whose arms build sequence-holding records has corrupted
 // earlier live record reads on mncs-portable-wasm-mvp (returning -1
 // where mncs-research-bytecode returns the source-semantic 1),
 // depending on the compiler build. Self-contained: no imports, so
-// future service edits cannot perturb it. See SVC-P-021 for the
+// future service edits cannot perturb it. See SVC-P-021 for the historical
 // build-dependent divergence record; do not restructure this probe
 // around any backend.
 

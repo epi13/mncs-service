@@ -263,52 +263,10 @@ UNIT = ["lifecycle", "errors", "retry", "time", "queue", "worker",
         "framing", "config", "observe", "contract", "shutdown", "service",
         "store_index_protocol"]
 
-# Backend-differential pins (SVC-P-021), observed under the compiler
-# binary recorded in the suite header (see PINNED_BINARY_SHA below).
-# The wasm backend is unsound for service-shaped code in that build:
-# research returns the source-semantic value while wasm returns wrong
-# values (-1 assertion trips, one 222222 pack corruption) or traps
-# out-of-bounds. Keys are "corpus-stem:case-id"; values pin the wasm
-# observation as {"status": ..., "value": ...} ("value" omitted when
-# the pinned outcome is a trap). Research always gates semantics; a
-# wasm run that stops matching its pin (fixed OR newly broken) fails
-# loudly so pins are revisited, never silently stale. A rebuild of the
-# compiler can shift the divergence set — that is itself SVC-P-021
-# evidence, not suite rot: re-run, re-observe, re-pin, record the hash.
-PINNED_BINARY_SHA = "0ff46ac8"
-WASM_KNOWN_DIVERGENT = {
-    "lifecycle:reject": {"status": "returned", "value": -1},
-    "queue:shed": {"status": "returned", "value": -1},
-    "worker:flow": {"status": "returned", "value": -1},
-    "worker:reap": {"status": "returned", "value": -1},
-    "observe:stream": {"status": "returned", "value": 222222},
-    "service:admit": {"status": "runtime_failure"},
-    "service:complete": {"status": "returned", "value": -1},
-    "ex_minimal_service:run": {"status": "returned", "value": -1},
-    "ex_worker_service:run": {"status": "returned", "value": -1},
-    "ex_graceful_shutdown:run": {"status": "returned", "value": -1},
-}
-
-
-def assert_cases(ctx, result, corpus_name, backend_name, pins=None):
-    pins = pins or {}
+def assert_cases(ctx, result, corpus_name, backend_name):
     cases = result.get("cases", [])
     for c in cases:
         label = f"{corpus_name}:{c.get('case_id')}@{backend_name}"
-        pin = pins.get(f"{corpus_name}:{c.get('case_id')}")
-        if pin is not None:
-            if "expected" in c and c.get("expectation_met") is True:
-                ctx.check(f"{label} divergence resolved — remove pin", False,
-                          f"wasm now agrees (SVC-P-021 revisit): {json.dumps(c.get('returned'))[:120]}")
-                continue
-            vals = c.get("returned") or []
-            scalar = (vals[0]["integer"]["value"] if len(vals) == 1 and "integer" in vals[0] else None)
-            want_value = pin.get("value", scalar)
-            matches = c.get("status") == pin["status"] and scalar == want_value
-            ctx.check(f"{label} divergence pinned (SVC-P-021)", matches,
-                      f"status={c.get('status')} returned={json.dumps(c.get('returned'))[:160]} "
-                      f"reason={json.dumps(c.get('failure_reason'))[:120]} pin={pin}")
-            continue
         ctx.check(f"{label} returned", c.get("status") == "returned",
                   f"status={c.get('status')} reason={json.dumps(c.get('failure_reason'))[:160]}")
         if "expected" in c:
@@ -333,18 +291,14 @@ def unit_suite(ctx):
         print(f"-- backend {name} --")
         for source, stem in targets:
             corpus = os.path.join(CORPORA, stem + ".json")
-            pins = WASM_KNOWN_DIVERGENT if name == "wasm" else {}
             result, err = ctx.run_experiment(source, corpus, f"unit-{stem}-{name}")
             if result is None:
                 ctx.check(f"unit {stem}@{name} runs", False, err)
                 continue
-            by_backend.setdefault(stem, {})[name] = assert_cases(ctx, result, stem, name, pins)
+            by_backend.setdefault(stem, {})[name] = assert_cases(ctx, result, stem, name)
     if len(ctx.backends) == 2:
         print("-- cross-backend agreement --")
         for mod, per in by_backend.items():
-            if any(k.split(":")[0] == mod for k in WASM_KNOWN_DIVERGENT):
-                print(f"  skip unit {mod} research==wasm (pinned divergence, SVC-P-021)")
-                continue
             names = list(per)
             if len(names) == 2:
                 same = json.dumps(per[names[0]], sort_keys=True) == json.dumps(per[names[1]], sort_keys=True)
@@ -408,17 +362,13 @@ def integration_suite(ctx):
         source = os.path.join(REPO, "examples", ex + ".mncs")
         for name, backend in ctx.backends:
             ctx.backend = backend
-            pins = WASM_KNOWN_DIVERGENT if name == "wasm" else {}
             result, err = ctx.run_experiment(source, corpus, f"ex-{ex}-{name}")
             if result is None:
                 ctx.check(f"example {ex}@{name} runs", False, err)
                 continue
-            pure_returns.setdefault(ex, {})[name] = assert_cases(ctx, result, f"ex_{ex}", name, pins)
+            pure_returns.setdefault(ex, {})[name] = assert_cases(ctx, result, f"ex_{ex}", name)
     if len(ctx.backends) == 2:
         for ex, per in pure_returns.items():
-            if any(k.split(":")[0] == f"ex_{ex}" for k in WASM_KNOWN_DIVERGENT):
-                print(f"  skip example {ex} research==wasm (pinned divergence, SVC-P-021)")
-                continue
             if len(per) == 2:
                 names = list(per)
                 same = json.dumps(per[names[0]], sort_keys=True) == json.dumps(per[names[1]], sort_keys=True)

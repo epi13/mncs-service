@@ -11,10 +11,10 @@ explicit state values.
 Every behavior has two halves (RFC 0002):
 
 - **Decision half (MNCS, `src/svc/`).** Pure state transitions with
-  explicit acceptance verdicts. Compiles under `mncs 0.13`; research-backend
-  observations are the semantic gate, wasm-backend observations are recorded
-  and pinned where they diverge (SVC-P-021). All asserted by corpora in
-  `tests/corpora/`.
+  explicit acceptance verdicts. Compiles under `mncs 0.13`; research and
+  current portable-WASM observations are checked by the same corpora. The
+  historical SVC-P-021 pins were retired after a clean current-build
+  differential recheck.
 - **Driving half (host, `tools/svc_test.py`).** The event loop the
   language lacks: feeds request bytes via `--grant-read`, collects
   ledger bytes via `--grant-write`, stamps time via `--grant-time`,
@@ -63,9 +63,9 @@ operator grants.
 7. **Testing** — `tools/svc_test.py` (static/use/corpus cross-checks,
    per-module corpora on both backends with cross-backend agreement,
    grant-driven integration with an independent Python framing oracle,
-   backend-differential canary plus per-case pinned divergences in
-   `WASM_KNOWN_DIVERGENT` — research gates semantics, wasm agreement
-   asserted where it holds, divergence pinned where found, SVC-P-021).
+   backend-differential canary — research and portable-WASM agreement are
+   asserted for the current build; the historical SVC-P-021 pin set is no
+   longer part of ordinary execution.
 
 ## Key invariants (checked, not just documented)
 

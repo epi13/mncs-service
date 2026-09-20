@@ -27,7 +27,7 @@ Current classifications are authoritative in `native-userland-audit.json`:
 | SVC-P-010 | still real | the first protocol is flat/bounded; generic recursive values remain absent |
 | SVC-P-014 | partially resolved | bounded effects exist, but grant realization is still an external boundary |
 | SVC-P-015 | partially resolved | lifecycle decisions are native; timers, scheduling, and randomness remain external |
-| SVC-P-021 | still real | the pinned WASM differential remains an active backend pressure |
+| SVC-P-021 | resolved | clean current-build differential agrees across all former cases; historical pins were retired and the canary remains |
 
 No blanket profile declaration was raised to 0.18: the new protocol itself
 uses Profile 0.13 semantics, while 0.18 is the family compatibility ceiling.
@@ -40,9 +40,9 @@ Conventions:
 
 - **Reproducer paths** are relative to this repository unless prefixed
   with `mncs-language:`.
-- **Compiler under test:** the prebuilt `mncs` binary at
-  `../mncs-language/target/debug/mncs` (built 2026-09-10 from
-  `mncs-language` at profile 0.13). Source profiles used here:
+- **Compiler under test:** the exact `mncs-language` binary selected by each
+  verification run; the 2026-09-20 reconciliation used clean current debug
+  and release builds. Source profiles used by this repository remain
   `mncs 0.13` throughout.
 - **Status values:** `open` (no workaround possible / blocks design),
   `worked-around` (development continues with a documented cost),
@@ -72,7 +72,7 @@ Conventions:
 | SVC-P-018 | Chained `a.b.c[i]` projections do not parse | syntax | P2 | worked-around |
 | SVC-P-019 | Corpus boundary is exact: signedness mismatches reject | tooling | P2 | observation |
 | SVC-P-020 | Step budgets are host-declared fuel with no in-language query | runtime | P2 | worked-around |
-| SVC-P-021 | WASM backend miscompiles match-built sequence records (regression) | optimizer/backend | P0 | open |
+| SVC-P-021 | WASM backend miscompiles match-built sequence records (historical regression) | optimizer/backend | P0 | resolved |
 
 ---
 
@@ -518,7 +518,14 @@ Conventions:
   available, and they are currently write-only.
 - **Priority:** P2. **Status:** worked-around.
 
-## SVC-P-021 — WASM backend unsound for service-shaped code (shifting)
+## SVC-P-021 — Historical WASM service-shaped divergence (resolved on clean current build)
+
+**Current status (2026-09-20):** The historical ten-case divergence set did
+not reproduce against clean current `mncs-language` origin/main-derived
+builds. Research and portable WASM returned the same values/statuses for all
+former cases, so the pinning workaround was deleted from `tools/svc_test.py`.
+The self-contained probe remains as a differential regression canary; any
+future disagreement is a new backend defect, not an accepted pin.
 
 - **Affected component:** wasm runs of `lifecycle:reject`,
   `queue:shed`, `worker:flow/reap`, `observe:stream`,
@@ -557,8 +564,9 @@ Conventions:
   - 19:30 build: probe agrees again, backpressure/retry agree, but
     lifecycle:reject, queue:shed, worker, observe, service,
     minimal newly diverge (including an OOB trap);
-  - 19:43 build (`sha256 0ff46ac8…`, pinned for this run): same
-    10-case divergence set as 19:30 (see `WASM_KNOWN_DIVERGENT`).
+  - 19:43 build (`sha256 0ff46ac8…`, pinned for that historical run): same
+    10-case divergence set as 19:30. Those observations are retained as
+    provenance, not as current expected behavior.
   A full suite run that straddles a rebuild executes different cases
   under different compilers — garbage verdicts. The harness now
   records the binary hash/mtime in its header and aborts when the
@@ -571,14 +579,11 @@ Conventions:
   with verdict FAIL — the binary couples exit code to verdict, 0
   otherwise; the harness parses stdout regardless). The trap case
   reports `backend trap: out-of-bounds memory load`.
-- **Workaround used:** NONE in service code — restructuring service
-  logic around a moving backend target would contort the
-  architecture and hide the bug. Instead the harness pins each
-  divergent wasm case (`WASM_KNOWN_DIVERGENT` in `tools/svc_test.py`,
-  labeled with the pinning binary hash): research gates semantics;
-  a wasm run matching its pin passes as "divergence pinned"; a wasm
-  run that stops matching (fixed or newly broken) fails loudly so
-  pins are re-observed and re-based, never silently stale.
+- **Historical workaround:** NONE in service code — restructuring service
+  logic around a moving backend target would contort the architecture and
+  hide the bug. The historical harness pins were removed after the clean
+  current-build recheck; the current harness gates every WASM case directly
+  against its expected value and cross-backend agreement.
 - **Why pinning instead of avoidance:** the trigger family is what
   natural service code looks like; avoiding it means writing worse
   services — and the set moves per build anyway, so avoidance cannot

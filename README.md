@@ -57,9 +57,8 @@ python3 tools/svc_test.py --suite integration
 # explicit binary / library locations
 python3 tools/svc_test.py --mncs-bin /path/to/mncs --lang-lib /path/to/mncs-language/library
 
-# pin a private compiler copy for a stable run (the language repo's
-# binary may be rebuilt at any time; the suite aborts if it changes
-# mid-run and logs path/sha256/mtime on every invocation)
+# run against a private compiler copy for a stable differential run (the
+# suite logs path/sha256/mtime on every invocation)
 cp ../mncs-language/target/debug/mncs target/mncs-pin-local
 MNCS_BIN=$PWD/target/mncs-pin-local python3 tools/svc_test.py
 
@@ -108,22 +107,18 @@ let s0: svc.service.Service = svc.service.assemble(cfg, c);
 ## Current status and limits
 
 Works now: all 12 modules and all 8 examples assert green on the
-research backend (23 unit cases + example packs); framed echo +
-ledger observability run through real grants with byte-exact
-ledgers. Known divergence (SVC-P-021, P0): the wasm backend is
-unsound for service-shaped code in current builds (wrong values, one
-pack corruption, one out-of-bounds trap — the set shifts between
-compiler builds), so 10 wasm cases pin their divergent observations
-while research gates semantics — see `tools/svc_test.py`
-(`WASM_KNOWN_DIVERGENT`, labeled with the pinning binary hash) and
-`tests/probes/` (self-contained canary). The suite passes with pins;
-a wasm run that stops matching its pin fails loudly for re-basing.
+research and current portable-WASM backends (23 unit cases + example
+packs); framed echo + ledger observability run through real grants with
+byte-exact ledgers. The historical SVC-P-021 divergence did not reproduce
+on a clean current `mncs-language` build: the ten old pins were retired,
+and the differential gate remains active. `tests/probes/` keeps the
+self-contained backend canary.
 Experimental: everything networked beyond the grant-file transport,
 multi-KB frames, jitter, dynamic authority — each recorded as
 language pressure with a reproducer. See `docs/NEXT.md` for the
 roadmap and `docs/LANGUAGE_PRESSURES.md` for what the language must
 improve.
 
-The suite logs the exact compiler binary (path, sha256, mtime) on
-every run: the binary belongs to `mncs-language` and may be rebuilt
-at any time — which is precisely how SVC-P-021 was caught.
+The suite logs the exact compiler binary (path, sha256, mtime) on every
+run: the binary belongs to `mncs-language`, and backend agreement is checked
+against that exact build.

@@ -14,6 +14,6 @@
     {"legacy": "SVC-P-010", "status": "still_real", "note": "Generic recursive protocol values remain absent; the first service contract is deliberately flat and bounded."},
     {"legacy": "SVC-P-014", "status": "partially_resolved", "note": "Filesystem/process effects are available in current profiles, but grant realization remains an external boundary."},
     {"legacy": "SVC-P-015", "status": "partially_resolved", "note": "Lifecycle, admission, freshness, release, and shutdown decisions now execute through the retained native protocol; actual runtime timers/concurrency remain external."},
-    {"legacy": "SVC-P-021", "status": "still_real", "note": "WASM service-shaped divergence remains pinned by the existing suite."}
+    {"legacy": "SVC-P-021", "status": "resolved", "note": "Clean current mncs-language builds agree with research on all former service-shaped cases; the ten historical WASM pins were removed and the differential canary remains."}
   ]
 }
