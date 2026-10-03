@@ -1,6 +1,19 @@
 # mncs-service
 
 <!-- MNCS:generated:begin -->
+## Project entry
+
+Machine-native application-service infrastructure for MNCS: small composable primitives for building long-running, concurrent, networked services — lifecycle, bounded queues, worker pools, retries, framing, configuration, contracts, observability, and graceful shutdown — written in MNCS language (profile 0.13) as total bounded functions, plus a host-side driver for what the language cannot yet express.
+
+```bash
+python3 -m pytest tests/test_resident_service.py -q
+```
+
+Declared capabilities (declarations do not establish execution health):
+
+- `resident-query-service/1` — serving-contract (experimental)
+
+Semantic sources and ownership: `.mncs/projections.json`.
 <!-- MNCS:generated:end -->
 
 Machine-native application-service infrastructure for MNCS: small

@@ -1,0 +1,46 @@
+{
+  "capabilities": [
+    {
+      "contract": "resident-query-service",
+      "fingerprint_sources": [
+        "src/svc/store_index_protocol.mncs",
+        "tools/resident_service.py"
+      ],
+      "kind": "serving-contract",
+      "stability": "experimental",
+      "version": "1"
+    }
+  ],
+  "dependencies": [
+    {
+      "contract": "mncs.store.persistent-state/1",
+      "envelope": {
+        "op": "exact",
+        "version": "1"
+      },
+      "evidence_refs": [
+        "tools/resident_service.py"
+      ],
+      "required": true
+    },
+    {
+      "contract": "mncs.index.derived-index/1",
+      "envelope": {
+        "op": "exact",
+        "version": "1"
+      },
+      "evidence_refs": [
+        "tools/resident_service.py"
+      ],
+      "required": true
+    }
+  ],
+  "entry": [
+    "python3 -m pytest tests/test_resident_service.py -q"
+  ],
+  "purpose": "Machine-native application-service infrastructure for MNCS: small composable primitives for building long-running, concurrent, networked services — lifecycle, bounded queues, worker pools, retries, framing, configuration, contracts, observability, and graceful shutdown — written in MNCS language (profile 0.13) as total bounded functions, plus a host-side driver for what the language cannot yet express.",
+  "repository": "mncs-service",
+  "schema_version": "mncs.project-view/1",
+  "source_identity": "sha256:863b7edaaa2acff93f178b9c2696921d316742c22380717a07c453f288f2141c",
+  "structure": {}
+}
