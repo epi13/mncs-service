@@ -1,5 +1,8 @@
 # mncs-service
 
+<!-- MNCS:generated:begin -->
+<!-- MNCS:generated:end -->
+
 Machine-native application-service infrastructure for MNCS: small
 composable primitives for building long-running, concurrent,
 networked services — lifecycle, bounded queues, worker pools,

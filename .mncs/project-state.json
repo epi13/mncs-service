@@ -1,0 +1,17 @@
+{
+  "schema_version": "mncs.project-intent/1",
+  "purpose": "Machine-native application-service infrastructure for MNCS: small composable primitives for building long-running, concurrent, networked services \u2014 lifecycle, bounded queues, worker pools, retries, framing, configuration, contracts, observability, and graceful shutdown \u2014 written in MNCS language (profile 0.13) as total bounded functions, plus a host-side driver for what the language cannot yet express.",
+  "entry": [
+    "python3 -m pytest tests/test_resident_service.py -q"
+  ],
+  "milestones": [
+    {
+      "id": "mncs-service:projection-conformance",
+      "title": "Declared ambient projection surfaces satisfy their contract",
+      "subject_slot": "declarations",
+      "evidence": "projection-conformance",
+      "dependencies": [],
+      "blockers": []
+    }
+  ]
+}
